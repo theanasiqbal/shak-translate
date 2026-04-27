@@ -1,0 +1,16 @@
+{
+  "name": "shaktranslate-backend",
+  "version": "1.0.0",
+  "description": "WebSocket relay + Gemini AI processor for ShakTranslate two-user conversation",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.44.0",
+    "dotenv": "^16.4.5",
+    "uuid": "^11.0.5",
+    "ws": "^8.18.0"
+  }
+}
