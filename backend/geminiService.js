@@ -54,7 +54,7 @@ function wrapInWavHeader(pcmBase64) {
 async function processAudioChunk(audioBase64, mimeType, inputLang, outputLang) {
   // ── Step 1: Transcribe + Translate ──────────────────────────────────────────
   const translationResponse = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
     contents: {
       parts: [
         {

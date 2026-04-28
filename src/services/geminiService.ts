@@ -16,7 +16,7 @@ export interface TranslationResult {
 
 export async function translateAudio(base64Audio: string, mimeType: string, expectedLanguage: string): Promise<TranslationResult> {
   const response = await ai.models.generateContent({
-    model: "gemini-2.0-flash",
+    model: "gemini-2.5-flash",
     contents: {
       parts: [
         {
@@ -137,7 +137,7 @@ function wrapInWavHeader(pcmBase64: string): string {
 
 export async function generateSpeech(text: string): Promise<SpeechResponse> {
   console.log("Generating speech for:", text);
-  
+
   const callModel = async (promptText: string) => {
     return await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
@@ -159,16 +159,16 @@ export async function generateSpeech(text: string): Promise<SpeechResponse> {
       response = await callModel(text);
     } catch (error: any) {
       console.error("Gemini TTS API Error:", error);
-      
+
       // If we hit a 429 Resource Exhausted, wait a few seconds and try one more time
       if (error?.status === 429 || error?.message?.includes("429") || error?.message?.includes("Resource exhausted")) {
         console.warn("Rate limit exhausted. Waiting 3 seconds before retrying...");
         await new Promise(resolve => setTimeout(resolve, 3000));
         response = await callModel(text);
-      } 
+      }
       else if (error.message?.includes("should only be used for TTS")) {
-         console.warn("Retrying with explicit transcript instruction...");
-         response = await callModel(text); // the prompt is already robust now, but we can try once more
+        console.warn("Retrying with explicit transcript instruction...");
+        response = await callModel(text); // the prompt is already robust now, but we can try once more
       } else {
         throw error;
       }
