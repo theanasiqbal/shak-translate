@@ -4,7 +4,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 
 interface QRScannerProps {
-  onScanned: (sessionId: string) => void;
+  onScanned: (sessionId: string, guestMyLang?: string, guestPartnerLang?: string) => void;
   onCancel: () => void;
 }
 
@@ -41,10 +41,25 @@ export function QRScanner({ onScanned, onCancel }: QRScannerProps) {
     hasScanned.current = true;
     setScanned(true);
 
+    let sessionId = data.trim();
+    let guestMyLang: string | undefined;
+    let guestPartnerLang: string | undefined;
+
+    try {
+      const parsed = JSON.parse(sessionId);
+      if (parsed.s) {
+        sessionId = parsed.s;
+        guestMyLang = parsed.p; // Guest's language is the host's partner language
+        guestPartnerLang = parsed.m; // Guest's partner language is the host's language
+      }
+    } catch (e) {
+      // Fallback: it might just be a raw UUID from an older version
+    }
+
     // Validate it looks like a UUID
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(data.trim())) {
+    if (!uuidRegex.test(sessionId)) {
       Alert.alert('Invalid QR Code', 'This QR code does not contain a valid session ID.', [
         {
           text: 'Scan Again',
@@ -58,7 +73,7 @@ export function QRScanner({ onScanned, onCancel }: QRScannerProps) {
       return;
     }
 
-    onScanned(data.trim());
+    onScanned(sessionId, guestMyLang, guestPartnerLang);
   };
 
   return (

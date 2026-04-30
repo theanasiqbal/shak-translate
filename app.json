@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "shak-1-expo",
-    "slug": "shak-1-expo",
+    "name": "ShakTranslate",
+    "slug": "shak-translate",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -13,7 +13,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.shak1expo"
+      "bundleIdentifier": "com.anonymous.shaktranslate"
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +23,12 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.shak1expo"
+      "package": "com.anonymous.shaktranslate",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.CAMERA"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -40,7 +45,13 @@
         {
           "cameraPermission": "Allow ShakTranslate to access your camera to scan QR codes for joining sessions."
         }
-      ]
-    ]
+      ],
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "60f773f2-40c4-4470-a704-bff8962d4ae9"
+      }
+    }
   }
 }

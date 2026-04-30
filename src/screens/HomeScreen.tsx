@@ -52,10 +52,15 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
     setShowQR(true);
   };
 
-  const handleScanned = async (scannedId: string) => {
+  const handleScanned = async (scannedId: string, guestMyLang?: string, guestPartnerLang?: string) => {
     setShowScanner(false);
     await joinSession(scannedId);
-    onSessionReady({ sessionId: scannedId, role: 'guest', myLang, partnerLang });
+    onSessionReady({ 
+      sessionId: scannedId, 
+      role: 'guest', 
+      myLang: guestMyLang || myLang, 
+      partnerLang: guestPartnerLang || partnerLang 
+    });
   };
 
   return (
@@ -142,7 +147,7 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
             <Text style={styles.modalSubtitle}>Ask your partner to scan this</Text>
 
             {sessionId ? (
-              <QRCodeDisplay sessionId={sessionId} />
+              <QRCodeDisplay sessionId={sessionId} myLang={myLang} partnerLang={partnerLang} />
             ) : (
               <ActivityIndicator color="#39FF14" size="large" style={{ marginVertical: 40 }} />
             )}

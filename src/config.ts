@@ -1,5 +1,5 @@
 // Central config — update WS_URL to your machine's local IP when testing on real devices
-export const WS_URL = 'ws://192.168.1.11:8080';
+export const WS_URL = 'wss://shak-translate.onrender.com';
 
 // Example for real device: export const WS_URL = 'ws://192.168.1.100:8080';
 
