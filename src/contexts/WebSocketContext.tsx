@@ -20,9 +20,10 @@ export interface TranslatedAudioPayload {
 interface WebSocketContextType {
   status: ConnectionStatus;
   sessionId: string | null;
+  partnerLang: string | null;
   isProcessing: boolean;
-  createSession: () => Promise<void>;
-  joinSession: (sid: string) => Promise<void>;
+  createSession: (lang: string) => Promise<void>;
+  joinSession: (sid: string, lang: string) => Promise<void>;
   sendAudioChunk: (
     audioBase64: string,
     mimeType: string,
@@ -31,6 +32,8 @@ interface WebSocketContextType {
     role: string,
     sid: string
   ) => void;
+  claimTurn: (role: string, sid: string) => void;
+  releaseTurn: (role: string, sid: string) => void;
   endSession: (role: string, sid: string) => void;
   // Internal registration for hooks
   registerCallbacks: (id: string, callbacks: WebSocketCallbacks) => void;
@@ -42,6 +45,9 @@ interface WebSocketCallbacks {
   onTranscript?: (originalText: string, translatedText: string) => void;
   onPartnerDisconnected?: () => void;
   onError?: (message: string) => void;
+  onPartnerSpeaking?: () => void;
+  onTurnRejected?: () => void;
+  onSessionReadyEvent?: (partnerLang: string) => void;
 }
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -49,6 +55,7 @@ const WebSocketContext = createContext<WebSocketContextType | null>(null);
 export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [status, setStatus] = useState<ConnectionStatus>('idle');
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [partnerLang, setPartnerLang] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   // Map of registered callbacks from various screens/components
@@ -72,6 +79,10 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     if (type === 'session_ready') {
       setStatus('connected');
+      if (message.partnerLang) {
+        setPartnerLang(message.partnerLang);
+        callbacksMap.current.forEach(c => c.onSessionReadyEvent?.(message.partnerLang));
+      }
     }
 
     if (type === 'processing_started') {
@@ -102,6 +113,14 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         callbacks.onPartnerDisconnected?.();
       }
 
+      if (type === 'partner_speaking') {
+        callbacks.onPartnerSpeaking?.();
+      }
+
+      if (type === 'turn_rejected') {
+        callbacks.onTurnRejected?.();
+      }
+
       if (type === 'error') {
         setIsProcessing(false);
         callbacks.onError?.(message.message);
@@ -109,7 +128,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   }, []);
 
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(async (lang: string) => {
     setStatus('connecting');
     try {
       websocketService.onMessage(handleMessage);
@@ -121,14 +140,14 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setStatus('error');
       });
       await websocketService.connect(WS_URL);
-      websocketService.send({ type: 'create_session' });
+      websocketService.send({ type: 'create_session', lang });
     } catch (e) {
       setStatus('error');
       callbacksMap.current.forEach(c => c.onError?.('Failed to connect to server.'));
     }
   }, [handleMessage]);
 
-  const joinSession = useCallback(async (sid: string) => {
+  const joinSession = useCallback(async (sid: string, lang: string) => {
     setStatus('connecting');
     try {
       websocketService.onMessage(handleMessage);
@@ -140,7 +159,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setStatus('error');
       });
       await websocketService.connect(WS_URL);
-      websocketService.send({ type: 'join_session', sessionId: sid });
+      websocketService.send({ type: 'join_session', sessionId: sid, lang });
       setSessionId(sid);
     } catch (e) {
       setStatus('error');
@@ -157,6 +176,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       role: string,
       sid: string
     ) => {
+      setIsProcessing(true);
       websocketService.send({
         type: 'audio_chunk',
         sessionId: sid,
@@ -170,11 +190,20 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     []
   );
 
+  const claimTurn = useCallback((role: string, sid: string) => {
+    websocketService.send({ type: 'claim_turn', sessionId: sid, role });
+  }, []);
+
+  const releaseTurn = useCallback((role: string, sid: string) => {
+    websocketService.send({ type: 'release_turn', sessionId: sid, role });
+  }, []);
+
   const endSession = useCallback((role: string, sid: string) => {
     websocketService.send({ type: 'end_session', sessionId: sid, role });
     websocketService.disconnect();
     setStatus('idle');
     setSessionId(null);
+    setPartnerLang(null);
     setIsProcessing(false);
   }, []);
 
@@ -190,10 +219,13 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       value={{
         status,
         sessionId,
+        partnerLang,
         isProcessing,
         createSession,
         joinSession,
         sendAudioChunk,
+        claimTurn,
+        releaseTurn,
         endSession,
         registerCallbacks,
         unregisterCallbacks,

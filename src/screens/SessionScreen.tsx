@@ -42,9 +42,11 @@ export function SessionScreen({
   const [currentReceivedText, setCurrentReceivedText] = useState<string | null>(null);
   const [sound, setSound] = useState<Audio.Sound | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [partnerSpeaking, setPartnerSpeaking] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  
   const scrollRef = useRef<ScrollView>(null);
-
-  const silenceCallbackRef = useRef<(() => void) | undefined>(undefined);
 
   // ── Audio Playback ──────────────────────────────────────────────────────────
   const playBase64Audio = useCallback(async (audioBase64: string) => {
@@ -62,13 +64,13 @@ export function SessionScreen({
 
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: `data:audio/wav;base64,${audioBase64}` },
-        { shouldPlay: true }
+        { shouldPlay: true, rate: 1.25, shouldCorrectPitch: true }
       );
       setSound(newSound);
       setIsPlayingAudio(true);
 
-      newSound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
+      newSound.setOnPlaybackStatusUpdate((playbackStatus) => {
+        if (playbackStatus.isLoaded && playbackStatus.didJustFinish) {
           setIsPlayingAudio(false);
         }
       });
@@ -79,9 +81,9 @@ export function SessionScreen({
   }, [sound]);
 
   // ── WebSocket ───────────────────────────────────────────────────────────────
-  const { status, isProcessing, sendAudioChunk, endSession } = useWebSocket({
+  const { status, isProcessing, sendAudioChunk, endSession, claimTurn, releaseTurn } = useWebSocket({
     onTranslatedAudio: useCallback((payload: TranslatedAudioPayload) => {
-      // Show the received translation
+      setPartnerSpeaking(false);
       setCurrentReceivedText(payload.translatedText);
       setTranscript(prev => [
         {
@@ -93,7 +95,6 @@ export function SessionScreen({
         },
         ...prev,
       ]);
-      // Play the audio
       playBase64Audio(payload.audioBase64);
     }, [playBase64Audio]),
 
@@ -102,6 +103,7 @@ export function SessionScreen({
     }, []),
 
     onPartnerDisconnected: useCallback(() => {
+      setPartnerSpeaking(false);
       Alert.alert(
         'Partner Disconnected',
         'Your partner has left the session.',
@@ -110,39 +112,38 @@ export function SessionScreen({
     }, [onEnd]),
 
     onError: useCallback((msg: string) => {
+      setPartnerSpeaking(false);
       Alert.alert('Error', msg);
     }, []),
+
+    onPartnerSpeaking: useCallback(() => {
+      setPartnerSpeaking(true);
+    }, []),
+
+    onTurnRejected: useCallback(() => {
+      // We tried to claim turn but partner already had it
+      // Automatically handled because partnerSpeaking will also be true soon (if not already)
+      setPartnerSpeaking(true);
+    }, [])
   });
 
-  // ── Recording ───────────────────────────────────────────────────────────────
-  const handleSilenceDetected = useCallback(() => {
-    if (silenceCallbackRef.current) {
-      silenceCallbackRef.current();
-    }
-  }, []);
+  const silenceCallbackRef = useRef<(() => void) | undefined>(undefined);
 
-  const { isRecording, startRecording, stopRecording, audioLevel } =
-    useAudioRecorder(handleSilenceDetected);
+  const handleSpeechDetected = useCallback(() => {
+    claimTurn(role, sessionId);
+  }, [claimTurn, role, sessionId]);
 
-  const handleRecordPress = async () => {
-    if (isRecording) {
-      try {
-        const { base64, mimeType } = await stopRecording();
-        if (base64 && base64.length > 100) {
-          sendAudioChunk(base64, mimeType, myLang, partnerLang, role, sessionId);
+  const { isRecording, isCalibrating, isSpeaking, startRecording, stopRecording, audioLevel } =
+    useAudioRecorder({
+      onSpeechDetected: handleSpeechDetected,
+      onSilenceDetected: useCallback(() => {
+        if (silenceCallbackRef.current) {
+          silenceCallbackRef.current();
         }
-      } catch (e) {
-        console.warn('[SessionScreen] Stop recording error:', e);
-      }
-    } else {
-      setCurrentSentText(null);
-      setCurrentReceivedText(null);
-      await startRecording();
-    }
-  };
+      }, []),
+    });
 
   const handleSilenceStop = useCallback(async () => {
-    if (!isRecording) return;
     try {
       const { base64, mimeType } = await stopRecording();
       if (base64 && base64.length > 100) {
@@ -151,31 +152,60 @@ export function SessionScreen({
     } catch (e) {
       console.warn('[SessionScreen] Silence stop error:', e);
     }
-  }, [isRecording, stopRecording, sendAudioChunk, myLang, partnerLang, role, sessionId]);
+  }, [stopRecording, sendAudioChunk, myLang, partnerLang, role, sessionId]);
 
   useEffect(() => {
     silenceCallbackRef.current = handleSilenceStop;
   }, [handleSilenceStop]);
 
+  // ── Auto-Hands-Free Loop ────────────────────────────────────────────────────
+  const canRecord = status === 'connected' && !isProcessing && !isPlayingAudio && !partnerSpeaking && !isPaused && !hasError;
+
+  useEffect(() => {
+    let mounted = true;
+    const manageRecordingState = async () => {
+      if (canRecord && !isRecording) {
+        try {
+          setCurrentSentText(null);
+          setCurrentReceivedText(null);
+          await startRecording();
+        } catch (e) {
+          console.warn('Auto start error:', e);
+          if (mounted) setHasError(true);
+        }
+      } else if (!canRecord && isRecording) {
+        try {
+          // We must stop recording. If it's because partner is speaking, we discard the chunk.
+          await stopRecording();
+        } catch (e) {
+          console.warn('Auto stop error:', e);
+        }
+      }
+    };
+    manageRecordingState();
+    return () => { mounted = false; };
+  }, [canRecord, isRecording, startRecording, stopRecording]);
+
+
   // ── Pulse animation ─────────────────────────────────────────────────────────
   const pulseAnim = useSharedValue(1);
   useEffect(() => {
-    if (isRecording) {
+    if (isSpeaking) {
       pulseAnim.value = withRepeat(
         withSequence(
-          withTiming(1.6, { duration: 800, easing: Easing.out(Easing.ease) }),
-          withTiming(1, { duration: 800, easing: Easing.in(Easing.ease) })
+          withTiming(1.6, { duration: 600, easing: Easing.out(Easing.ease) }),
+          withTiming(1, { duration: 600, easing: Easing.in(Easing.ease) })
         ),
         -1, false
       );
     } else {
       pulseAnim.value = withTiming(1, { duration: 300 });
     }
-  }, [isRecording]);
+  }, [isSpeaking, pulseAnim]);
 
   const pulseStyle = useAnimatedStyle(() => ({
     transform: [{ scale: pulseAnim.value }],
-    opacity: isRecording ? 1 - (pulseAnim.value - 1) * 1.2 : 0,
+    opacity: isSpeaking ? 1 - (pulseAnim.value - 1) * 1.2 : 0,
   }));
 
   // ── End Session ─────────────────────────────────────────────────────────────
@@ -205,8 +235,6 @@ export function SessionScreen({
     };
   }, [sound]);
 
-  const canRecord = status === 'connected' && !isProcessing && !isPlayingAudio;
-
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.topGlow} />
@@ -228,7 +256,7 @@ export function SessionScreen({
       <View style={styles.mainContent}>
 
         {/* Live status panel */}
-        {isRecording && (
+        {isRecording && !isCalibrating && !partnerSpeaking && (
           <View style={styles.livePanel}>
             <View style={styles.barsRow}>
               {[...Array(6)].map((_, i) => (
@@ -237,11 +265,28 @@ export function SessionScreen({
                   style={[
                     styles.audioBar,
                     { height: 12 + Math.random() * (audioLevel || 0.1) * 64 },
+                    isSpeaking && styles.audioBarSpeaking
                   ]}
                 />
               ))}
             </View>
-            <Text style={styles.listeningLabel}>LISTENING...</Text>
+            <Text style={[styles.listeningLabel, isSpeaking && { color: '#fff' }]}>
+              {isSpeaking ? 'SPEECH DETECTED...' : 'LISTENING...'}
+            </Text>
+          </View>
+        )}
+
+        {isCalibrating && (
+          <View style={styles.livePanel}>
+            <ActivityIndicator size="small" color="#39FF14" />
+            <Text style={[styles.listeningLabel, { marginTop: 12 }]}>CALIBRATING ROOM NOISE...</Text>
+          </View>
+        )}
+
+        {partnerSpeaking && (
+          <View style={[styles.livePanel, { borderColor: 'rgba(255,165,0,0.3)', backgroundColor: 'rgba(255,165,0,0.05)' }]}>
+            <Feather name="user" size={24} color="orange" style={{ marginBottom: 8 }} />
+            <Text style={[styles.listeningLabel, { color: 'orange' }]}>PARTNER IS SPEAKING...</Text>
           </View>
         )}
 
@@ -275,17 +320,27 @@ export function SessionScreen({
         )}
 
         {/* Empty state */}
-        {!isRecording && !isProcessing && !currentSentText && !currentReceivedText && !isPlayingAudio && (
+        {!isRecording && !isProcessing && !currentSentText && !currentReceivedText && !isPlayingAudio && !partnerSpeaking && !isCalibrating && !hasError && (
           <View style={styles.emptyState}>
-            <Feather name="mic" size={40} color="rgba(255,255,255,0.1)" />
+            <Feather name={isPaused ? "mic-off" : "mic"} size={40} color="rgba(255,255,255,0.1)" />
             <Text style={styles.emptyTitle}>
-              {status === 'connected' ? 'Tap the mic to speak' : 'Waiting for connection...'}
+              {status === 'connected' 
+                ? (isPaused ? 'Listening Paused' : 'Ready to speak') 
+                : 'Waiting for connection...'}
             </Text>
             <Text style={styles.emptySub}>
               {status === 'connected'
-                ? `Speak in ${myLang} — your partner hears ${partnerLang}`
+                ? (isPaused ? 'Tap to resume hands-free mode' : 'Hands-free mode active. Just speak!')
                 : 'Make sure the other device has scanned the QR code.'}
             </Text>
+          </View>
+        )}
+
+        {hasError && (
+          <View style={styles.emptyState}>
+            <Feather name="alert-circle" size={40} color="#ef4444" />
+            <Text style={styles.emptyTitle}>Microphone Error</Text>
+            <Text style={styles.emptySub}>Please tap the button below to retry.</Text>
           </View>
         )}
 
@@ -330,26 +385,30 @@ export function SessionScreen({
       {/* Controls */}
       <View style={styles.controls}>
         <View style={styles.micWrapper}>
-          {isRecording && <Animated.View style={[styles.micPulseRing, pulseStyle]} />}
+          {isSpeaking && <Animated.View style={[styles.micPulseRing, pulseStyle]} />}
           <TouchableOpacity
             style={[
               styles.micBtn,
-              isRecording && styles.micBtnRecording,
-              !canRecord && !isRecording && styles.micBtnDisabled,
+              isPaused && styles.micBtnPaused,
+              (!isPaused && status !== 'connected' && !hasError) && styles.micBtnDisabled,
+              hasError && styles.micBtnError,
             ]}
-            onPress={handleRecordPress}
-            disabled={!canRecord && !isRecording}
+            onPress={() => {
+              if (hasError) setHasError(false);
+              else setIsPaused(!isPaused);
+            }}
+            disabled={status !== 'connected'}
             activeOpacity={0.8}
           >
             <Feather
-              name={isRecording ? 'mic-off' : 'mic'}
+              name={hasError ? 'refresh-cw' : isPaused ? 'mic-off' : 'mic'}
               size={32}
-              color={isRecording ? '#fff' : !canRecord ? 'rgba(0,0,0,0.4)' : '#000'}
+              color={isPaused || hasError ? '#fff' : status !== 'connected' ? 'rgba(0,0,0,0.4)' : '#000'}
             />
           </TouchableOpacity>
         </View>
         <Text style={styles.micHint}>
-          {isRecording ? 'Tap to stop  ·  Silence auto-stops' : canRecord ? 'Tap to speak' : 'Please wait...'}
+          {hasError ? 'Tap to Retry Microphone' : isPaused ? 'Tap to Resume Listening' : status === 'connected' ? 'Tap to Pause Listening' : 'Please wait...'}
         </Text>
       </View>
     </SafeAreaView>
@@ -387,10 +446,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', height: 64, marginBottom: 12,
   },
   audioBar: {
-    width: 5, backgroundColor: '#39FF14', borderRadius: 3, marginHorizontal: 3,
+    width: 5, backgroundColor: 'rgba(57,255,20,0.4)', borderRadius: 3, marginHorizontal: 3,
+  },
+  audioBarSpeaking: {
+    backgroundColor: '#39FF14',
   },
   listeningLabel: {
-    color: '#39FF14', fontSize: 10,
+    color: 'rgba(57,255,20,0.5)', fontSize: 10,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     letterSpacing: 3,
   },
@@ -465,7 +527,7 @@ const styles = StyleSheet.create({
   },
   micPulseRing: {
     position: 'absolute', width: 90, height: 90, borderRadius: 45,
-    backgroundColor: '#ef4444',
+    backgroundColor: '#39FF14',
   },
   micBtn: {
     width: 80, height: 80, borderRadius: 40,
@@ -474,8 +536,9 @@ const styles = StyleSheet.create({
     shadowColor: '#39FF14', shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.4, shadowRadius: 12, elevation: 6,
   },
-  micBtnRecording: { backgroundColor: '#ef4444' },
-  micBtnDisabled: { backgroundColor: 'rgba(57,255,20,0.25)' },
+  micBtnPaused: { backgroundColor: '#ef4444', shadowColor: '#ef4444' },
+  micBtnError: { backgroundColor: '#f97316', shadowColor: '#f97316' },
+  micBtnDisabled: { backgroundColor: 'rgba(57,255,20,0.25)', shadowOpacity: 0 },
   micHint: {
     color: 'rgba(255,255,255,0.25)', fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',

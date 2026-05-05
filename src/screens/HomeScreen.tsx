@@ -16,6 +16,7 @@ import { QRCodeDisplay } from '../components/QRCodeDisplay';
 import { QRScanner } from '../components/QRScanner';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { StatusBadge } from '../components/StatusBadge';
+import { useRef } from 'react';
 
 interface HomeScreenProps {
   onSessionReady: (params: {
@@ -28,39 +29,35 @@ interface HomeScreenProps {
 
 export function HomeScreen({ onSessionReady }: HomeScreenProps) {
   const [myLang, setMyLang] = useState('English');
-  const [partnerLang, setPartnerLang] = useState('Mandarin');
   const [showQR, setShowQR] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const roleRef = useRef<'host' | 'guest' | null>(null);
 
-  const { status, sessionId, createSession, joinSession } = useWebSocket({
+  const { status, sessionId, partnerLang, createSession, joinSession } = useWebSocket({
     onError: (msg) => setErrorMsg(msg),
     onTranslatedAudio: () => {}, // not used here
     onPartnerDisconnected: () => {},
   });
 
-  // Called when session is ready after host created it and guest scanned QR
+  // Called when session is ready and partner language is received
   React.useEffect(() => {
-    if (status === 'connected' && sessionId) {
-      onSessionReady({ sessionId, role: 'host', myLang, partnerLang });
+    if (status === 'connected' && sessionId && partnerLang && roleRef.current) {
+      onSessionReady({ sessionId, role: roleRef.current, myLang, partnerLang });
     }
-  }, [status]);
+  }, [status, sessionId, partnerLang]);
 
   const handleStartSession = async () => {
     setErrorMsg(null);
-    await createSession();
+    roleRef.current = 'host';
+    await createSession(myLang);
     setShowQR(true);
   };
 
-  const handleScanned = async (scannedId: string, guestMyLang?: string, guestPartnerLang?: string) => {
+  const handleScanned = async (scannedId: string) => {
     setShowScanner(false);
-    await joinSession(scannedId);
-    onSessionReady({ 
-      sessionId: scannedId, 
-      role: 'guest', 
-      myLang: guestMyLang || myLang, 
-      partnerLang: guestPartnerLang || partnerLang 
-    });
+    roleRef.current = 'guest';
+    await joinSession(scannedId, myLang);
   };
 
   return (
@@ -92,10 +89,8 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
 
         {/* Language Config */}
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>LANGUAGE SETUP</Text>
-          <LanguageSelector label="My Language" selected={myLang} onSelect={setMyLang} />
-          <View style={styles.divider} />
-          <LanguageSelector label="Partner's Language" selected={partnerLang} onSelect={setPartnerLang} />
+          <Text style={styles.cardTitle}>MY LANGUAGE</Text>
+          <LanguageSelector label="" selected={myLang} onSelect={setMyLang} />
         </View>
 
         {/* Actions */}
@@ -147,7 +142,7 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
             <Text style={styles.modalSubtitle}>Ask your partner to scan this</Text>
 
             {sessionId ? (
-              <QRCodeDisplay sessionId={sessionId} myLang={myLang} partnerLang={partnerLang} />
+              <QRCodeDisplay sessionId={sessionId} />
             ) : (
               <ActivityIndicator color="#39FF14" size="large" style={{ marginVertical: 40 }} />
             )}

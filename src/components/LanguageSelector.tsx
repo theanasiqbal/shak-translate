@@ -18,7 +18,7 @@ interface LanguageSelectorProps {
 export function LanguageSelector({ label, selected, onSelect }: LanguageSelectorProps) {
   return (
     <View style={styles.wrapper}>
-      <Text style={styles.label}>{label}</Text>
+      {label ? <Text style={styles.label}>{label}</Text> : null}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}

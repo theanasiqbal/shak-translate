@@ -4,7 +4,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Feather } from '@expo/vector-icons';
 
 interface QRScannerProps {
-  onScanned: (sessionId: string, guestMyLang?: string, guestPartnerLang?: string) => void;
+  onScanned: (sessionId: string) => void;
   onCancel: () => void;
 }
 
@@ -42,15 +42,11 @@ export function QRScanner({ onScanned, onCancel }: QRScannerProps) {
     setScanned(true);
 
     let sessionId = data.trim();
-    let guestMyLang: string | undefined;
-    let guestPartnerLang: string | undefined;
 
     try {
       const parsed = JSON.parse(sessionId);
       if (parsed.s) {
         sessionId = parsed.s;
-        guestMyLang = parsed.p; // Guest's language is the host's partner language
-        guestPartnerLang = parsed.m; // Guest's partner language is the host's language
       }
     } catch (e) {
       // Fallback: it might just be a raw UUID from an older version
@@ -73,7 +69,7 @@ export function QRScanner({ onScanned, onCancel }: QRScannerProps) {
       return;
     }
 
-    onScanned(sessionId, guestMyLang, guestPartnerLang);
+    onScanned(sessionId);
   };
 
   return (

@@ -8,7 +8,7 @@ const wss = new WebSocketServer({ port: PORT });
 
 /**
  * Session store:
- * sessions = Map<sessionId, { host: WebSocket | null, guest: WebSocket | null }>
+ * sessions = Map<sessionId, { host: WebSocket | null, guest: WebSocket | null, lockedBy: 'host' | 'guest' | null }>
  */
 const sessions = new Map();
 
@@ -60,18 +60,19 @@ wss.on('connection', (ws) => {
 
     // ── CREATE SESSION (Host) ────────────────────────────────────────────────
     if (type === 'create_session') {
+      const { lang } = message;
       const sessionId = uuidv4();
-      sessions.set(sessionId, { host: ws, guest: null });
+      sessions.set(sessionId, { host: ws, hostLang: lang, guest: null, guestLang: null, lockedBy: null });
       currentSessionId = sessionId;
       currentRole = 'host';
-      console.log(`[server] Session created: ${sessionId}`);
+      console.log(`[server] Session created: ${sessionId} (Host lang: ${lang})`);
       send(ws, { type: 'session_created', sessionId });
       return;
     }
 
     // ── JOIN SESSION (Guest) ─────────────────────────────────────────────────
     if (type === 'join_session') {
-      const { sessionId } = message;
+      const { sessionId, lang } = message;
       const session = sessions.get(sessionId);
 
       if (!session) {
@@ -84,13 +85,47 @@ wss.on('connection', (ws) => {
       }
 
       session.guest = ws;
+      session.guestLang = lang;
       currentSessionId = sessionId;
       currentRole = 'guest';
-      console.log(`[server] Guest joined session: ${sessionId}`);
+      console.log(`[server] Guest joined session: ${sessionId} (Guest lang: ${lang})`);
 
-      // Notify both parties
-      send(session.host, { type: 'session_ready', role: 'host', sessionId });
-      send(session.guest, { type: 'session_ready', role: 'guest', sessionId });
+      // Notify both parties with their respective partner's language
+      send(session.host, { type: 'session_ready', role: 'host', sessionId, partnerLang: session.guestLang });
+      send(session.guest, { type: 'session_ready', role: 'guest', sessionId, partnerLang: session.hostLang });
+      return;
+    }
+
+    // ── FLOOR CONTROL (Turn-Taking) ──────────────────────────────────────────
+    if (type === 'claim_turn') {
+      const { sessionId, role } = message;
+      const session = sessions.get(sessionId);
+      if (!session) return;
+      
+      // If someone else already has the lock, reject this claim
+      if (session.lockedBy && session.lockedBy !== role) {
+        send(ws, { type: 'turn_rejected' });
+        return;
+      }
+      
+      // Grant lock to the sender
+      session.lockedBy = role;
+      
+      // Notify partner
+      const partnerSocket = getPartnerSocket(session, role);
+      send(partnerSocket, { type: 'partner_speaking' });
+      return;
+    }
+
+    if (type === 'release_turn') {
+      const { sessionId, role } = message;
+      const session = sessions.get(sessionId);
+      if (!session) return;
+      
+      // Only the person who locked it can release it, or if it's already null
+      if (session.lockedBy === role) {
+        session.lockedBy = null;
+      }
       return;
     }
 
@@ -138,8 +173,12 @@ wss.on('connection', (ws) => {
           translatedText: result.translatedText,
         });
 
+        // Free the lock so the other person can speak
+        session.lockedBy = null;
+
         send(ws, { type: 'processing_done' });
       } catch (err) {
+        session.lockedBy = null; // free lock on error
         console.error('[server] Gemini error:', err.message);
         send(ws, { type: 'error', message: 'AI processing failed: ' + err.message });
       }

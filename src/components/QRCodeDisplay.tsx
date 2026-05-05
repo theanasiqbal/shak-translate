@@ -4,12 +4,10 @@ import QRCode from 'react-native-qrcode-svg';
 
 interface QRCodeDisplayProps {
   sessionId: string;
-  myLang: string;
-  partnerLang: string;
 }
 
-export function QRCodeDisplay({ sessionId, myLang, partnerLang }: QRCodeDisplayProps) {
-  const qrValue = JSON.stringify({ s: sessionId, m: myLang, p: partnerLang });
+export function QRCodeDisplay({ sessionId }: QRCodeDisplayProps) {
+  const qrValue = JSON.stringify({ s: sessionId });
   return (
     <View style={styles.container}>
       <Text style={styles.label}>SCAN TO JOIN</Text>

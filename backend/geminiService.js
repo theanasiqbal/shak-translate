@@ -1,13 +1,20 @@
 require('dotenv').config();
 const { GoogleGenAI } = require('@google/genai');
 
-const apiKey = process.env.GEMINI_API_KEY;
-if (!apiKey) {
-  console.error('GEMINI_API_KEY is not set in .env!');
+const project = process.env.GOOGLE_CLOUD_PROJECT;
+const location = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+
+if (!project) {
+  console.error('GOOGLE_CLOUD_PROJECT is not set in .env!');
   process.exit(1);
 }
 
-const ai = new GoogleGenAI({ apiKey });
+// ── Vertex AI client (uses Application Default Credentials automatically) ────
+const ai = new GoogleGenAI({
+  vertexai: true,
+  project,
+  location,
+});
 
 /**
  * Wraps raw PCM data (24kHz, 16-bit, mono) in a WAV header.
@@ -29,8 +36,8 @@ function wrapInWavHeader(pcmBase64) {
   header.writeUInt32LE(chunkSize, 4);
   header.write('WAVE', 8, 'ascii');
   header.write('fmt ', 12, 'ascii');
-  header.writeUInt32LE(16, 16);       // Subchunk1Size (PCM)
-  header.writeUInt16LE(1, 20);        // AudioFormat (PCM = 1)
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
   header.writeUInt16LE(numChannels, 22);
   header.writeUInt32LE(sampleRate, 24);
   header.writeUInt32LE(byteRate, 28);
@@ -55,16 +62,18 @@ async function processAudioChunk(audioBase64, mimeType, inputLang, outputLang) {
   // ── Step 1: Transcribe + Translate ──────────────────────────────────────────
   const translationResponse = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            data: audioBase64,
-            mimeType: mimeType,
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            inlineData: {
+              data: audioBase64,
+              mimeType: mimeType,
+            },
           },
-        },
-        {
-          text: `You are a professional interpreter. The spoken audio is in ${inputLang}. 
+          {
+            text: `You are a professional interpreter. The spoken audio is in ${inputLang}. 
 Transcribe it exactly, then translate it into ${outputLang}. 
 Return ONLY a valid JSON object (no markdown, no extra text) with these keys:
 - "originalText": the exact transcription in ${inputLang}
@@ -72,9 +81,10 @@ Return ONLY a valid JSON object (no markdown, no extra text) with these keys:
 - "detectedLanguage": the detected language name
 
 If the audio contains no intelligible speech, return { "originalText": "", "translatedText": "", "detectedLanguage": "${inputLang}", "isEmpty": true }.`,
-        },
-      ],
-    },
+          },
+        ],
+      },
+    ],
     config: {
       responseModalities: ['TEXT'],
       responseMimeType: 'application/json',
@@ -82,7 +92,6 @@ If the audio contains no intelligible speech, return { "originalText": "", "tran
   });
 
   let translationText = translationResponse.text || '{}';
-  // Strip any accidental markdown fences
   translationText = translationText.replace(/```json/g, '').replace(/```/g, '').trim();
 
   let parsed;
@@ -102,6 +111,7 @@ If the audio contains no intelligible speech, return { "originalText": "", "tran
     model: 'gemini-2.5-flash-preview-tts',
     contents: [
       {
+        role: 'user',
         parts: [
           {
             text: `You are a Text-to-Speech engine. Read the following text aloud exactly, word-for-word, in ${outputLang}. Do not add any commentary.\n\n"${parsed.translatedText}"`,
