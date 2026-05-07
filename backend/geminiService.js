@@ -1,11 +1,27 @@
 require('dotenv').config();
 const { GoogleGenAI } = require('@google/genai');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// Load GCP service account credentials from env var (for Render deployment).
+// Set GOOGLE_APPLICATION_CREDENTIALS_JSON to the full JSON contents of your key file.
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  try {
+    const credPath = path.join(os.tmpdir(), 'gcp-credentials.json');
+    fs.writeFileSync(credPath, process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON, 'utf8');
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = credPath;
+    console.log('[geminiService] GCP credentials loaded from env var.');
+  } catch (err) {
+    console.error('[geminiService] Failed to write GCP credentials:', err.message);
+  }
+}
 
 const project = process.env.GOOGLE_CLOUD_PROJECT;
 const location = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
 
 if (!project) {
-  console.error('GOOGLE_CLOUD_PROJECT is not set in .env!');
+  console.error('[geminiService] GOOGLE_CLOUD_PROJECT is not set!');
   process.exit(1);
 }
 
@@ -25,14 +41,14 @@ function wrapPcmInWav(pcmBuffer, sampleRate = 24000) {
   const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
   const blockAlign = numChannels * (bitsPerSample / 8);
   const dataSize = pcmBuffer.length;
-  
+
   const buffer = Buffer.alloc(44 + dataSize);
-  
+
   // RIFF chunk descriptor
   buffer.write('RIFF', 0);
   buffer.writeUInt32LE(36 + dataSize, 4);
   buffer.write('WAVE', 8);
-  
+
   // fmt sub-chunk
   buffer.write('fmt ', 12);
   buffer.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
@@ -42,14 +58,14 @@ function wrapPcmInWav(pcmBuffer, sampleRate = 24000) {
   buffer.writeUInt32LE(byteRate, 28);
   buffer.writeUInt16LE(blockAlign, 32);
   buffer.writeUInt16LE(bitsPerSample, 34);
-  
+
   // data sub-chunk
   buffer.write('data', 36);
   buffer.writeUInt32LE(dataSize, 40);
-  
+
   // PCM data
   pcmBuffer.copy(buffer, 44);
-  
+
   return buffer;
 }
 
