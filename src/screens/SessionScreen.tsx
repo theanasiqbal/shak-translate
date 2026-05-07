@@ -45,58 +45,85 @@ export function SessionScreen({
   const [partnerSpeaking, setPartnerSpeaking] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [hasError, setHasError] = useState(false);
-  
+
   const scrollRef = useRef<ScrollView>(null);
 
   // ── Audio Playback ──────────────────────────────────────────────────────────
-  const playBase64Audio = useCallback(async (audioBase64: string) => {
-    try {
-      if (sound) {
-        await sound.stopAsync();
-        await sound.unloadAsync();
-        setSound(null);
+  const audioQueueRef = useRef<{ base64: string; index: number; text: string }[]>([]);
+  const isPlayingQueueRef = useRef(false);
+
+  const processAudioQueue = useCallback(async () => {
+    if (isPlayingQueueRef.current || audioQueueRef.current.length === 0) return;
+
+    isPlayingQueueRef.current = true;
+    setIsPlayingAudio(true);
+
+    while (audioQueueRef.current.length > 0) {
+      // Sort queue to guarantee sequential playback if chunks arrived out of order
+      audioQueueRef.current.sort((a, b) => a.index - b.index);
+
+      const chunk = audioQueueRef.current.shift();
+      if (!chunk) continue;
+
+      // Incrementally update UI text as we play the chunk
+      if (chunk.index === 0) {
+        setCurrentReceivedText(chunk.text);
+      } else {
+        setCurrentReceivedText((prev) => (prev ? prev + ' ' + chunk.text : chunk.text));
       }
 
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+        });
 
-      const { sound: newSound } = await Audio.Sound.createAsync(
-        { uri: `data:audio/wav;base64,${audioBase64}` },
-        { shouldPlay: true, rate: 1.25, shouldCorrectPitch: true }
-      );
-      setSound(newSound);
-      setIsPlayingAudio(true);
+        const { sound: newSound } = await Audio.Sound.createAsync(
+          // Updated to match the new backend Gemini Native Audio WAV output
+          { uri: `data:audio/wav;base64,${chunk.base64}` },
+          { shouldPlay: true }
+        );
 
-      newSound.setOnPlaybackStatusUpdate((playbackStatus) => {
-        if (playbackStatus.isLoaded && playbackStatus.didJustFinish) {
-          setIsPlayingAudio(false);
-        }
-      });
-    } catch (e) {
-      console.error('[SessionScreen] Playback error:', e);
-      setIsPlayingAudio(false);
+        // Wait until this specific chunk is fully played
+        await new Promise((resolve) => {
+          newSound.setOnPlaybackStatusUpdate((playbackStatus) => {
+            if (playbackStatus.isLoaded && playbackStatus.didJustFinish) {
+              resolve(true);
+            }
+          });
+        });
+
+        await newSound.unloadAsync();
+      } catch (e) {
+        console.error('[SessionScreen] Playback queue error:', e);
+      }
     }
-  }, [sound]);
+
+    isPlayingQueueRef.current = false;
+    setIsPlayingAudio(false);
+  }, []);
 
   // ── WebSocket ───────────────────────────────────────────────────────────────
   const { status, isProcessing, sendAudioChunk, endSession, claimTurn, releaseTurn } = useWebSocket({
-    onTranslatedAudio: useCallback((payload: TranslatedAudioPayload) => {
+    onTranslatedAudioChunk: useCallback((payload: any) => {
       setPartnerSpeaking(false);
-      setCurrentReceivedText(payload.translatedText);
+      audioQueueRef.current.push({ base64: payload.audioBase64, index: payload.index, text: payload.text });
+      processAudioQueue();
+    }, [processAudioQueue]),
+
+    onTranslatedAudioFinal: useCallback((original: string, translated: string) => {
+      setPartnerSpeaking(false);
       setTranscript(prev => [
         {
           id: `recv-${Date.now()}`,
           direction: 'received',
-          original: payload.originalText,
-          translated: payload.translatedText,
+          original: original,
+          translated: translated,
           timestamp: Date.now(),
         },
         ...prev,
       ]);
-      playBase64Audio(payload.audioBase64);
-    }, [playBase64Audio]),
+    }, []),
 
     onTranscript: useCallback((original: string, translated: string) => {
       setCurrentSentText(`${original} → ${translated}`);
@@ -121,8 +148,6 @@ export function SessionScreen({
     }, []),
 
     onTurnRejected: useCallback(() => {
-      // We tried to claim turn but partner already had it
-      // Automatically handled because partnerSpeaking will also be true soon (if not already)
       setPartnerSpeaking(true);
     }, [])
   });
@@ -175,7 +200,6 @@ export function SessionScreen({
         }
       } else if (!canRecord && isRecording) {
         try {
-          // We must stop recording. If it's because partner is speaking, we discard the chunk.
           await stopRecording();
         } catch (e) {
           console.warn('Auto stop error:', e);
@@ -324,8 +348,8 @@ export function SessionScreen({
           <View style={styles.emptyState}>
             <Feather name={isPaused ? "mic-off" : "mic"} size={40} color="rgba(255,255,255,0.1)" />
             <Text style={styles.emptyTitle}>
-              {status === 'connected' 
-                ? (isPaused ? 'Listening Paused' : 'Ready to speak') 
+              {status === 'connected'
+                ? (isPaused ? 'Listening Paused' : 'Ready to speak')
                 : 'Waiting for connection...'}
             </Text>
             <Text style={styles.emptySub}>

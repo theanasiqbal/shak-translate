@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
-const { processAudioChunk } = require('./geminiService');
+const { processAudioChunk, warmupSession, closeSession } = require('./geminiService');
 
 const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
@@ -36,6 +36,10 @@ function cleanupSession(sessionId, disconnectedRole) {
   if (partnerSocket && partnerSocket.readyState === partnerSocket.OPEN) {
     partnerSocket.close();
   }
+
+  // Clean up persistent Gemini Live sessions for both roles
+  closeSession(sessionId, 'host');
+  closeSession(sessionId, 'guest');
 
   sessions.delete(sessionId);
   console.log(`[server] Session ${sessionId} cleaned up (${disconnectedRole} disconnected).`);
@@ -93,6 +97,10 @@ wss.on('connection', (ws) => {
       // Notify both parties with their respective partner's language
       send(session.host, { type: 'session_ready', role: 'host', sessionId, partnerLang: session.guestLang });
       send(session.guest, { type: 'session_ready', role: 'guest', sessionId, partnerLang: session.hostLang });
+
+      // Pre-warm Gemini Live connections for both roles so first translation is instant
+      warmupSession(sessionId, 'host', session.hostLang, session.guestLang).catch(console.error);
+      warmupSession(sessionId, 'guest', session.guestLang, session.hostLang).catch(console.error);
       return;
     }
 
@@ -101,16 +109,16 @@ wss.on('connection', (ws) => {
       const { sessionId, role } = message;
       const session = sessions.get(sessionId);
       if (!session) return;
-      
+
       // If someone else already has the lock, reject this claim
       if (session.lockedBy && session.lockedBy !== role) {
         send(ws, { type: 'turn_rejected' });
         return;
       }
-      
+
       // Grant lock to the sender
       session.lockedBy = role;
-      
+
       // Notify partner
       const partnerSocket = getPartnerSocket(session, role);
       send(partnerSocket, { type: 'partner_speaking' });
@@ -121,7 +129,7 @@ wss.on('connection', (ws) => {
       const { sessionId, role } = message;
       const session = sessions.get(sessionId);
       if (!session) return;
-      
+
       // Only the person who locked it can release it, or if it's already null
       if (session.lockedBy === role) {
         session.lockedBy = null;
@@ -149,13 +157,27 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'processing_started' });
 
       try {
-        const result = await processAudioChunk(audioBase64, mimeType, inputLang, outputLang);
+        const result = await processAudioChunk(
+          sessionId,
+          role,
+          audioBase64,
+          mimeType,
+          inputLang,
+          outputLang,
+          (chunk) => {
+            // Send each chunk as soon as TTS finishes
+            send(partnerSocket, {
+              type: 'translated_audio_chunk',
+              audioBase64: chunk.audioBase64,
+              mimeType: 'audio/wav',
+              index: chunk.index,
+              text: chunk.text
+            });
+          }
+        );
 
-        if (!result.audioBase64) {
-          // Empty / silent audio — silently ignore
-          send(ws, { type: 'processing_done' });
-          return;
-        }
+        // Notify both that processing finished (stop loading indicator)
+        send(ws, { type: 'processing_done' });
 
         // Send transcript back to sender for display
         send(ws, {
@@ -164,11 +186,9 @@ wss.on('connection', (ws) => {
           translatedText: result.translatedText,
         });
 
-        // Send translated audio to the PARTNER
+        // Send the final text payload for the UI display to partner
         send(partnerSocket, {
-          type: 'translated_audio',
-          audioBase64: result.audioBase64,
-          mimeType: 'audio/wav',
+          type: 'translated_audio_final',
           originalText: result.originalText,
           translatedText: result.translatedText,
         });
@@ -176,7 +196,6 @@ wss.on('connection', (ws) => {
         // Free the lock so the other person can speak
         session.lockedBy = null;
 
-        send(ws, { type: 'processing_done' });
       } catch (err) {
         session.lockedBy = null; // free lock on error
         console.error('[server] Gemini error:', err.message);

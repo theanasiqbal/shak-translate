@@ -17,6 +17,13 @@ export interface TranslatedAudioPayload {
   translatedText: string;
 }
 
+export interface TranslatedAudioChunkPayload {
+  audioBase64: string;
+  mimeType: string;
+  index: number;
+  text: string;
+}
+
 interface WebSocketContextType {
   status: ConnectionStatus;
   sessionId: string | null;
@@ -42,6 +49,8 @@ interface WebSocketContextType {
 
 interface WebSocketCallbacks {
   onTranslatedAudio?: (payload: TranslatedAudioPayload) => void;
+  onTranslatedAudioChunk?: (payload: TranslatedAudioChunkPayload) => void;
+  onTranslatedAudioFinal?: (originalText: string, translatedText: string) => void;
   onTranscript?: (originalText: string, translatedText: string) => void;
   onPartnerDisconnected?: () => void;
   onError?: (message: string) => void;
@@ -102,6 +111,19 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           originalText: message.originalText,
           translatedText: message.translatedText,
         });
+      }
+
+      if (type === 'translated_audio_chunk') {
+        callbacks.onTranslatedAudioChunk?.({
+          audioBase64: message.audioBase64,
+          mimeType: message.mimeType,
+          index: message.index,
+          text: message.text,
+        });
+      }
+
+      if (type === 'translated_audio_final') {
+        callbacks.onTranslatedAudioFinal?.(message.originalText, message.translatedText);
       }
 
       if (type === 'transcript') {

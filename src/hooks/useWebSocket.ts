@@ -1,10 +1,12 @@
 import { useEffect, useId } from 'react';
-import { useWebSocketContext, TranslatedAudioPayload } from '../contexts/WebSocketContext';
+import { useWebSocketContext, TranslatedAudioPayload, TranslatedAudioChunkPayload } from '../contexts/WebSocketContext';
 
-export { ConnectionStatus, TranslatedAudioPayload } from '../contexts/WebSocketContext';
+export { ConnectionStatus, TranslatedAudioPayload, TranslatedAudioChunkPayload } from '../contexts/WebSocketContext';
 
 interface UseWebSocketOptions {
   onTranslatedAudio?: (payload: TranslatedAudioPayload) => void;
+  onTranslatedAudioChunk?: (payload: TranslatedAudioChunkPayload) => void;
+  onTranslatedAudioFinal?: (originalText: string, translatedText: string) => void;
   onTranscript?: (originalText: string, translatedText: string) => void;
   onPartnerDisconnected?: () => void;
   onError?: (message: string) => void;

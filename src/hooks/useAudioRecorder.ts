@@ -13,18 +13,18 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [recordingUri, setRecordingUri] = useState<string | null>(null);
-  
+
   const recordingRef = useRef<Audio.Recording | null>(null);
   const isStartingRef = useRef<boolean>(false);
   const isStoppingRef = useRef<boolean>(false);
   const recordingStartTimeRef = useRef<number>(0);
-  
+
   // VAD state
   const isCalibratedRef = useRef<boolean>(false);
   const calibrationSamplesRef = useRef<number[]>([]);
   const calibrationEndRef = useRef<number | null>(null);
   const thresholdRef = useRef<number>(-40);
-  
+
   const speechStartRef = useRef<number | null>(null);
   const silenceStartRef = useRef<number | null>(null);
   const hasSpokenRef = useRef<boolean>(false);
@@ -32,7 +32,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
 
   const onSpeechRef = useRef(onSpeechDetected);
   const onSilenceRef = useRef(onSilenceDetected);
-  
+
   useEffect(() => {
     onSpeechRef.current = onSpeechDetected;
     onSilenceRef.current = onSilenceDetected;
@@ -68,7 +68,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
 
       cleanupRecording();
       setRecordingUri(null);
-      
+
       if (!isCalibratedRef.current) {
         setIsCalibrating(true);
         calibrationSamplesRef.current = [];
@@ -78,14 +78,14 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
         setIsCalibrating(false);
         calibrationEndRef.current = null;
       }
-      
+
       const { recording } = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY,
         (status) => {
           if (status.isRecording && status.metering !== undefined) {
             const meter = status.metering;
             const now = Date.now();
-            
+
             // Map metering (-160 to 0) to level (0 to 1) for UI
             const minDb = -60;
             const clampedMeter = Math.max(minDb, meter);
@@ -101,13 +101,13 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
               calibrationEndRef.current = null;
               setIsCalibrating(false);
               isCalibratedRef.current = true;
-              
+
               if (calibrationSamplesRef.current.length > 5) {
                 // Calculate 85th percentile
                 const sorted = [...calibrationSamplesRef.current].sort((a, b) => a - b);
                 const p85Index = Math.floor(sorted.length * 0.85);
                 const ambientFloor = sorted[p85Index];
-                
+
                 // Threshold is ambient + 15dB, clamped between -55 and -10
                 let newThreshold = ambientFloor + 15;
                 newThreshold = Math.max(-55, Math.min(-10, newThreshold));
@@ -118,10 +118,10 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
 
             // ── VAD LOGIC ──────────────────────────────────────────────
             const isLoud = meter > thresholdRef.current;
-            
+
             if (isLoud) {
               silenceStartRef.current = null;
-              
+
               if (!hasSpokenRef.current) {
                 if (!speechStartRef.current) {
                   speechStartRef.current = now;
@@ -139,12 +139,13 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
             } else {
               speechStartRef.current = null;
               setIsSpeaking(false);
-              
+
               if (hasSpokenRef.current) {
                 if (!silenceStartRef.current) {
                   silenceStartRef.current = now;
-                } else if (now - silenceStartRef.current > 1000) { // 1000ms silence trigger
-                  // Trigger silence detected once
+                } else if (now - silenceStartRef.current > 500) {
+                  // ✅ CHANGE: Reduced from 1000ms → 500ms silence trigger
+                  // Saves ~500ms off every single translation cycle
                   hasSpokenRef.current = false; // Reset to avoid multiple triggers
                   if (onSilenceRef.current) onSilenceRef.current();
                 }
@@ -158,7 +159,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
       recordingStartTimeRef.current = Date.now();
       recordingRef.current = recording;
       setIsRecording(true);
-      
+
     } catch (err) {
       console.error('Failed to start recording', err);
       cleanupRecording();
@@ -173,10 +174,10 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
       throw new Error("Already stopping recording");
     }
     if (!recordingRef.current) {
-        cleanupRecording();
-        throw new Error("No active recording found");
+      cleanupRecording();
+      throw new Error("No active recording found");
     }
-    
+
     isStoppingRef.current = true;
     try {
       const now = Date.now();
@@ -186,30 +187,30 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
       }
 
       try {
-          await recordingRef.current.stopAndUnloadAsync();
+        await recordingRef.current.stopAndUnloadAsync();
       } catch (err) {
-          console.warn("Error stopping recording natively:", err);
+        console.warn("Error stopping recording natively:", err);
       }
-      
+
       const uri = recordingRef.current.getURI();
-      
+
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
       });
-      
+
       if (!uri) {
         throw new Error('Recording stopped but no URI was available. Audio might not have started correctly.');
       }
-      
+
       setRecordingUri(uri);
-      
+
       const base64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: 'base64',
+        encoding: 'base64',
       });
-      
+
       const mimeType = uri.endsWith('.m4a') ? 'audio/mp4' : 'audio/webm';
-      
+
       return { base64, mimeType };
     } finally {
       recordingRef.current = null;
