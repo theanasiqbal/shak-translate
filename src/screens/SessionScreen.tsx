@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View, Text, TouchableOpacity, StyleSheet, SafeAreaView,
   Platform, ScrollView, ActivityIndicator, Alert,
@@ -104,7 +104,7 @@ export function SessionScreen({
   }, []);
 
   // ── WebSocket ───────────────────────────────────────────────────────────────
-  const { status, isProcessing, sendAudioChunk, endSession, claimTurn, releaseTurn } = useWebSocket({
+  const { status, isProcessing, sendAudioChunk, endSession } = useWebSocket({
     onTranslatedAudioChunk: useCallback((payload: any) => {
       setPartnerSpeaking(false);
       audioQueueRef.current.push({ base64: payload.audioBase64, index: payload.index, text: payload.text });
@@ -114,13 +114,7 @@ export function SessionScreen({
     onTranslatedAudioFinal: useCallback((original: string, translated: string) => {
       setPartnerSpeaking(false);
       setTranscript(prev => [
-        {
-          id: `recv-${Date.now()}`,
-          direction: 'received',
-          original: original,
-          translated: translated,
-          timestamp: Date.now(),
-        },
+        { id: `recv-${Date.now()}`, direction: 'received', original, translated, timestamp: Date.now() },
         ...prev,
       ]);
     }, []),
@@ -131,11 +125,7 @@ export function SessionScreen({
 
     onPartnerDisconnected: useCallback(() => {
       setPartnerSpeaking(false);
-      Alert.alert(
-        'Partner Disconnected',
-        'Your partner has left the session.',
-        [{ text: 'OK', onPress: onEnd }]
-      );
+      Alert.alert('Partner Disconnected', 'Your partner has left the session.', [{ text: 'OK', onPress: onEnd }]);
     }, [onEnd]),
 
     onError: useCallback((msg: string) => {
@@ -143,28 +133,33 @@ export function SessionScreen({
       Alert.alert('Error', msg);
     }, []),
 
+    // partner_speaking now ONLY fires when real audio arrives at the server.
+    // No more false positives from VAD noise or cross-device leakage.
     onPartnerSpeaking: useCallback(() => {
       setPartnerSpeaking(true);
     }, []),
 
-    onTurnRejected: useCallback(() => {
-      setPartnerSpeaking(true);
-    }, [])
+    // lock_released fires when server finishes processing (belt-and-suspenders
+    // alongside translated_audio_final to guarantee partnerSpeaking clears).
+    onLockReleased: useCallback(() => {
+      setPartnerSpeaking(false);
+    }, []),
+
+    // turn_rejected is now a no-op — server ignores claim_turn entirely.
+    onTurnRejected: useCallback(() => { }, []),
   });
 
   const silenceCallbackRef = useRef<(() => void) | undefined>(undefined);
 
-  const handleSpeechDetected = useCallback(() => {
-    claimTurn(role, sessionId);
-  }, [claimTurn, role, sessionId]);
-
+  // VAD only drives the local UI (audio bars, "SPEECH DETECTED" text).
+  // It no longer claims any server floor — audio_chunk arrival does that.
   const { isRecording, isCalibrating, isSpeaking, startRecording, stopRecording, audioLevel } =
     useAudioRecorder({
-      onSpeechDetected: handleSpeechDetected,
+      onSpeechDetected: useCallback(() => {
+        // No server call needed — visual feedback only via isSpeaking state
+      }, []),
       onSilenceDetected: useCallback(() => {
-        if (silenceCallbackRef.current) {
-          silenceCallbackRef.current();
-        }
+        if (silenceCallbackRef.current) silenceCallbackRef.current();
       }, []),
     });
 
@@ -182,6 +177,27 @@ export function SessionScreen({
   useEffect(() => {
     silenceCallbackRef.current = handleSilenceStop;
   }, [handleSilenceStop]);
+
+  // ── Safety Watchdog ──────────────────────────────────────────────────────────
+  // partnerSpeaking should self-clear via translated_audio / lock_released.
+  // This is a last-resort 8s timeout for network hiccups or Gemini errors.
+  const partnerSpeakingStartRef = useRef<number | null>(null);
+  useEffect(() => {
+    partnerSpeakingStartRef.current = partnerSpeaking ? Date.now() : null;
+  }, [partnerSpeaking]);
+
+  useEffect(() => {
+    const watchdog = setInterval(() => {
+      const lockedAt = partnerSpeakingStartRef.current;
+      if (lockedAt && !isPlayingAudio && Date.now() - lockedAt > 8_000) {
+        console.warn('[SessionScreen] Watchdog: partnerSpeaking >8s with no audio — force clearing.');
+        setPartnerSpeaking(false);
+        partnerSpeakingStartRef.current = null;
+      }
+    }, 2_000);
+    return () => clearInterval(watchdog);
+  }, [isPlayingAudio]);
+
 
   // ── Auto-Hands-Free Loop ────────────────────────────────────────────────────
   const canRecord = status === 'connected' && !isProcessing && !isPlayingAudio && !partnerSpeaking && !isPaused && !hasError;
@@ -259,6 +275,13 @@ export function SessionScreen({
     };
   }, [sound]);
 
+  const barHeights = useMemo(() =>
+    [...Array(6)].map((_, i) => {
+      const phase = (i / 6) * Math.PI * 2;
+      return 12 + Math.abs(Math.sin(phase + audioLevel * 10)) * audioLevel * 64;
+    }),
+    [audioLevel]);
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.topGlow} />
@@ -283,14 +306,10 @@ export function SessionScreen({
         {isRecording && !isCalibrating && !partnerSpeaking && (
           <View style={styles.livePanel}>
             <View style={styles.barsRow}>
-              {[...Array(6)].map((_, i) => (
+              {barHeights.map((h, i) => (
                 <View
                   key={i}
-                  style={[
-                    styles.audioBar,
-                    { height: 12 + Math.random() * (audioLevel || 0.1) * 64 },
-                    isSpeaking && styles.audioBarSpeaking
-                  ]}
+                  style={[styles.audioBar, { height: h }, isSpeaking && styles.audioBarSpeaking]}
                 />
               ))}
             </View>

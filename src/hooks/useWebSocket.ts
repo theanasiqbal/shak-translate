@@ -12,6 +12,7 @@ interface UseWebSocketOptions {
   onError?: (message: string) => void;
   onPartnerSpeaking?: () => void;
   onTurnRejected?: () => void;
+  onLockReleased?: () => void;
   onSessionReadyEvent?: (partnerLang: string) => void;
 }
 

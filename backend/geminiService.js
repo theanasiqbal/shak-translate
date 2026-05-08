@@ -96,7 +96,7 @@ class LiveTranslationSession {
       config: {
         systemInstruction: {
           parts: [{
-            text: `You are a professional interpreter. The user will provide spoken audio in ${this.inputLang}. \nYou must translate it into ${this.outputLang}. Provide the spoken translation using your native audio voice.`
+            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech.`
           }]
         },
         responseModalities: ['AUDIO'],

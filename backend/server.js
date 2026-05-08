@@ -7,9 +7,19 @@ const PORT = process.env.PORT || 8080;
 const wss = new WebSocketServer({ port: PORT });
 
 /**
- * Session store:
- * sessions = Map<sessionId, { host: WebSocket | null, guest: WebSocket | null, lockedBy: 'host' | 'guest' | null }>
+ * ARCHITECTURE: "Audio-First" floor control
+ *
+ * partner_speaking is ONLY sent when real audio_chunk arrives at the server.
+ * VAD claim_turn messages are completely ignored — they were the source of
+ * all false "Partner is Speaking" states (noise, leakage, ringtones).
+ *
+ * Flow:
+ *  1. Device A speaks → VAD detects → silence → stopRecording → sendAudioChunk
+ *  2. Server receives audio_chunk → sends partner_speaking to B (real signal)
+ *  3. Server processes → sends results to B, lock_released to B
+ *  4. B clears partnerSpeaking → resumes recording
  */
+
 const sessions = new Map();
 
 function send(ws, payload) {
@@ -32,15 +42,12 @@ function cleanupSession(sessionId, disconnectedRole) {
     message: `${disconnectedRole === 'host' ? 'Host' : 'Guest'} has disconnected.`,
   });
 
-  // Close partner socket too
   if (partnerSocket && partnerSocket.readyState === partnerSocket.OPEN) {
     partnerSocket.close();
   }
 
-  // Clean up persistent Gemini Live sessions for both roles
   closeSession(sessionId, 'host');
   closeSession(sessionId, 'guest');
-
   sessions.delete(sessionId);
   console.log(`[server] Session ${sessionId} cleaned up (${disconnectedRole} disconnected).`);
 }
@@ -66,7 +73,11 @@ wss.on('connection', (ws) => {
     if (type === 'create_session') {
       const { lang } = message;
       const sessionId = uuidv4();
-      sessions.set(sessionId, { host: ws, hostLang: lang, guest: null, guestLang: null, lockedBy: null });
+      sessions.set(sessionId, {
+        host: ws, hostLang: lang,
+        guest: null, guestLang: null,
+        isProcessing: false,
+      });
       currentSessionId = sessionId;
       currentRole = 'host';
       console.log(`[server] Session created: ${sessionId} (Host lang: ${lang})`);
@@ -94,46 +105,18 @@ wss.on('connection', (ws) => {
       currentRole = 'guest';
       console.log(`[server] Guest joined session: ${sessionId} (Guest lang: ${lang})`);
 
-      // Notify both parties with their respective partner's language
-      send(session.host, { type: 'session_ready', role: 'host', sessionId, partnerLang: session.guestLang });
-      send(session.guest, { type: 'session_ready', role: 'guest', sessionId, partnerLang: session.hostLang });
+      send(session.host,  { type: 'session_ready', role: 'host',  sessionId, partnerLang: session.guestLang });
+      send(session.guest, { type: 'session_ready', role: 'guest', sessionId, partnerLang: session.hostLang  });
 
-      // Pre-warm Gemini Live connections for both roles so first translation is instant
-      warmupSession(sessionId, 'host', session.hostLang, session.guestLang).catch(console.error);
+      warmupSession(sessionId, 'host',  session.hostLang,  session.guestLang).catch(console.error);
       warmupSession(sessionId, 'guest', session.guestLang, session.hostLang).catch(console.error);
       return;
     }
 
-    // ── FLOOR CONTROL (Turn-Taking) ──────────────────────────────────────────
-    if (type === 'claim_turn') {
-      const { sessionId, role } = message;
-      const session = sessions.get(sessionId);
-      if (!session) return;
-
-      // If someone else already has the lock, reject this claim
-      if (session.lockedBy && session.lockedBy !== role) {
-        send(ws, { type: 'turn_rejected' });
-        return;
-      }
-
-      // Grant lock to the sender
-      session.lockedBy = role;
-
-      // Notify partner
-      const partnerSocket = getPartnerSocket(session, role);
-      send(partnerSocket, { type: 'partner_speaking' });
-      return;
-    }
-
-    if (type === 'release_turn') {
-      const { sessionId, role } = message;
-      const session = sessions.get(sessionId);
-      if (!session) return;
-
-      // Only the person who locked it can release it, or if it's already null
-      if (session.lockedBy === role) {
-        session.lockedBy = null;
-      }
+    // ── FLOOR CONTROL (ignored — VAD events are unreliable) ─────────────────
+    // claim_turn and release_turn are sent by the client but intentionally
+    // ignored here. Floor control is handled implicitly via audio_chunk.
+    if (type === 'claim_turn' || type === 'release_turn') {
       return;
     }
 
@@ -151,55 +134,50 @@ wss.on('connection', (ws) => {
         return;
       }
 
+      // If already processing, discard silently (prevents overlap)
+      // The client will naturally send the next chunk after the current one plays.
+      if (session.isProcessing) {
+        console.log(`[server] Session ${sessionId} busy — discarding ${role} chunk`);
+        send(ws, { type: 'processing_done' }); // unblock sender's isProcessing state
+        return;
+      }
+
+      session.isProcessing = true;
       const partnerSocket = getPartnerSocket(session, role);
 
-      // Notify sender that processing has started
+      // ✅ THIS is the only place partner_speaking fires — real audio arrived.
+      send(partnerSocket, { type: 'partner_speaking' });
       send(ws, { type: 'processing_started' });
 
       try {
         const result = await processAudioChunk(
-          sessionId,
-          role,
-          audioBase64,
-          mimeType,
-          inputLang,
-          outputLang,
+          sessionId, role, audioBase64, mimeType, inputLang, outputLang,
           (chunk) => {
-            // Send each chunk as soon as TTS finishes
             send(partnerSocket, {
               type: 'translated_audio_chunk',
               audioBase64: chunk.audioBase64,
               mimeType: 'audio/wav',
               index: chunk.index,
-              text: chunk.text
+              text: chunk.text,
             });
           }
         );
 
-        // Notify both that processing finished (stop loading indicator)
         send(ws, { type: 'processing_done' });
+        send(ws, { type: 'transcript', originalText: result.originalText, translatedText: result.translatedText });
+        send(partnerSocket, { type: 'translated_audio_final', originalText: result.originalText, translatedText: result.translatedText });
 
-        // Send transcript back to sender for display
-        send(ws, {
-          type: 'transcript',
-          originalText: result.originalText,
-          translatedText: result.translatedText,
-        });
-
-        // Send the final text payload for the UI display to partner
-        send(partnerSocket, {
-          type: 'translated_audio_final',
-          originalText: result.originalText,
-          translatedText: result.translatedText,
-        });
-
-        // Free the lock so the other person can speak
-        session.lockedBy = null;
+        // Tell partner the lock is released so they can resume recording
+        // (in case translated_audio_final didn't arrive cleanly)
+        send(partnerSocket, { type: 'lock_released' });
 
       } catch (err) {
-        session.lockedBy = null; // free lock on error
         console.error('[server] Gemini error:', err.message);
         send(ws, { type: 'error', message: 'AI processing failed: ' + err.message });
+        // Make sure partner isn't stuck
+        send(partnerSocket, { type: 'lock_released' });
+      } finally {
+        session.isProcessing = false;
       }
       return;
     }
@@ -227,4 +205,4 @@ wss.on('connection', (ws) => {
 });
 
 console.log(`[server] ShakTranslate WebSocket server running on ws://localhost:${PORT}`);
-console.log(`[server] Share your local IP with the mobile devices, e.g. ws://192.168.x.x:${PORT}`);
+console.log(`[server] Audio-first floor control active — partner_speaking only on real audio.`);

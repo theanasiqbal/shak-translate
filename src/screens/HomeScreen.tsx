@@ -34,7 +34,7 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const roleRef = useRef<'host' | 'guest' | null>(null);
 
-  const { status, sessionId, partnerLang, createSession, joinSession } = useWebSocket({
+  const { status, sessionId, partnerLang, createSession, joinSession, endSession } = useWebSocket({
     onError: (msg) => setErrorMsg(msg),
     onTranslatedAudio: () => {}, // not used here
     onPartnerDisconnected: () => {},
@@ -156,6 +156,9 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
             <TouchableOpacity
               style={styles.cancelBtn}
               onPress={() => {
+                if (sessionId) {
+                  endSession('host', sessionId);
+                }
                 setShowQR(false);
               }}
             >

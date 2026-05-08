@@ -39,7 +39,7 @@ interface WebSocketContextType {
     role: string,
     sid: string
   ) => void;
-  claimTurn: (role: string, sid: string) => void;
+  claimTurn: (role: string, sid: string, confidence?: number) => void;
   releaseTurn: (role: string, sid: string) => void;
   endSession: (role: string, sid: string) => void;
   // Internal registration for hooks
@@ -56,6 +56,7 @@ interface WebSocketCallbacks {
   onError?: (message: string) => void;
   onPartnerSpeaking?: () => void;
   onTurnRejected?: () => void;
+  onLockReleased?: () => void;
   onSessionReadyEvent?: (partnerLang: string) => void;
 }
 
@@ -143,6 +144,11 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         callbacks.onTurnRejected?.();
       }
 
+      if (type === 'lock_released') {
+        // Server watchdog auto-released a stale lock — clear the partnerSpeaking flag
+        callbacks.onLockReleased?.();
+      }
+
       if (type === 'error') {
         setIsProcessing(false);
         callbacks.onError?.(message.message);
@@ -212,8 +218,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     []
   );
 
-  const claimTurn = useCallback((role: string, sid: string) => {
-    websocketService.send({ type: 'claim_turn', sessionId: sid, role });
+  const claimTurn = useCallback((role: string, sid: string, confidence: number = 1) => {
+    websocketService.send({ type: 'claim_turn', sessionId: sid, role, confidence });
   }, []);
 
   const releaseTurn = useCallback((role: string, sid: string) => {
