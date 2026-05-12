@@ -2,6 +2,7 @@
   "expo": {
     "name": "ShakTranslate",
     "slug": "shak-translate",
+    "scheme": "shaktranslate",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -46,7 +47,15 @@
           "cameraPermission": "Allow ShakTranslate to access your camera to scan QR codes for joining sessions."
         }
       ],
-      "expo-font"
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow ShakTranslate to access your photos to update your profile picture."
+        }
+      ],
+      "expo-font",
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "extra": {
       "eas": {

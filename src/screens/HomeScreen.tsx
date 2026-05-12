@@ -16,7 +16,9 @@ import { QRCodeDisplay } from '../components/QRCodeDisplay';
 import { QRScanner } from '../components/QRScanner';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { StatusBadge } from '../components/StatusBadge';
+import { useAuth, useUser } from '@clerk/clerk-expo';
 import { useRef } from 'react';
+import { Image } from 'react-native';
 
 interface HomeScreenProps {
   onSessionReady: (params: {
@@ -25,9 +27,12 @@ interface HomeScreenProps {
     myLang: string;
     partnerLang: string;
   }) => void;
+  onOpenProfile: () => void;
 }
 
-export function HomeScreen({ onSessionReady }: HomeScreenProps) {
+export function HomeScreen({ onSessionReady, onOpenProfile }: HomeScreenProps) {
+  const { signOut } = useAuth();
+  const { user } = useUser();
   const [myLang, setMyLang] = useState('English');
   const [showQR, setShowQR] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
@@ -36,8 +41,8 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
 
   const { status, sessionId, partnerLang, createSession, joinSession, endSession } = useWebSocket({
     onError: (msg) => setErrorMsg(msg),
-    onTranslatedAudio: () => {}, // not used here
-    onPartnerDisconnected: () => {},
+    onTranslatedAudio: () => { }, // not used here
+    onPartnerDisconnected: () => { },
   });
 
   // Called when session is ready and partner language is received
@@ -69,12 +74,26 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={styles.header}>
-          <View style={styles.logoIcon}>
-            <Feather name="globe" size={20} color="#000" />
+          <View style={styles.headerTitleContainer}>
+            <View style={styles.logoIcon}>
+              <Feather name="globe" size={20} color="#000" />
+            </View>
+            <Text style={styles.title}>
+              Shak<Text style={styles.titleGreen}>Translate</Text>
+            </Text>
           </View>
-          <Text style={styles.title}>
-            Shak<Text style={styles.titleGreen}>Translate</Text>
-          </Text>
+          <View style={{ flexDirection: 'row', gap: 10 }}>
+            <TouchableOpacity onPress={onOpenProfile} style={styles.profileBtn}>
+              {user?.imageUrl ? (
+                <Image source={{ uri: user.imageUrl }} style={styles.profileAvatar} />
+              ) : (
+                <Feather name="user" size={18} color="rgba(255,255,255,0.6)" />
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => signOut()} style={styles.signOutBtn}>
+              <Feather name="log-out" size={18} color="rgba(255,255,255,0.6)" />
+            </TouchableOpacity>
+          </View>
         </View>
 
         <Text style={styles.subtitle}>Real-time two-way conversation translation</Text>
@@ -128,10 +147,6 @@ export function HomeScreen({ onSessionReady }: HomeScreenProps) {
             <Text style={styles.secondaryBtnText}>Join Session (Scan QR)</Text>
           </TouchableOpacity>
         </View>
-
-        <Text style={styles.footer}>
-          Both users must be on the same Wi-Fi or the server must be publicly accessible.
-        </Text>
       </ScrollView>
 
       {/* QR Code Modal (Host) */}
@@ -193,8 +208,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#39FF14', opacity: 0.05,
   },
   header: {
-    flexDirection: 'row', alignItems: 'center', marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8,
     paddingTop: Platform.OS === 'android' ? 20 : 8,
+  },
+  headerTitleContainer: {
+    flexDirection: 'row', alignItems: 'center',
   },
   logoIcon: {
     width: 36, height: 36, borderRadius: 10,
@@ -203,6 +221,27 @@ const styles = StyleSheet.create({
   },
   title: { color: '#fff', fontSize: 24, fontWeight: '800', letterSpacing: -0.5 },
   titleGreen: { color: '#39FF14' },
+  signOutBtn: {
+    padding: 8,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  profileBtn: {
+    padding: 6,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  profileAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+  },
   subtitle: {
     color: 'rgba(255,255,255,0.35)',
     fontSize: 13, marginBottom: 28,

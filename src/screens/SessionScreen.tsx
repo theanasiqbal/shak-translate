@@ -1,8 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, SafeAreaView,
-  Platform, ScrollView, ActivityIndicator, Alert,
+  View, Text, TouchableOpacity, StyleSheet,
+  ActivityIndicator, ScrollView, Platform, Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import { Feather } from '@expo/vector-icons';
 import Animated, {
@@ -52,20 +53,31 @@ export function SessionScreen({
   const audioQueueRef = useRef<{ base64: string; index: number; text: string }[]>([]);
   const isPlayingQueueRef = useRef(false);
 
+  const [isEchoGuardActive, setIsEchoGuardActive] = useState(false);
+
   const processAudioQueue = useCallback(async () => {
     if (isPlayingQueueRef.current || audioQueueRef.current.length === 0) return;
 
     isPlayingQueueRef.current = true;
     setIsPlayingAudio(true);
 
-    while (audioQueueRef.current.length > 0) {
-      // Sort queue to guarantee sequential playback if chunks arrived out of order
-      audioQueueRef.current.sort((a, b) => a.index - b.index);
+    // Set audio mode once at the start of the queue
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: true,
+      });
+    } catch (e) {
+      console.warn('[SessionScreen] Audio mode error:', e);
+    }
 
+    while (audioQueueRef.current.length > 0) {
+      audioQueueRef.current.sort((a, b) => a.index - b.index);
       const chunk = audioQueueRef.current.shift();
       if (!chunk) continue;
 
-      // Incrementally update UI text as we play the chunk
       if (chunk.index === 0) {
         setCurrentReceivedText(chunk.text);
       } else {
@@ -73,18 +85,11 @@ export function SessionScreen({
       }
 
       try {
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: false,
-          playsInSilentModeIOS: true,
-        });
-
         const { sound: newSound } = await Audio.Sound.createAsync(
-          // Updated to match the new backend Gemini Native Audio WAV output
           { uri: `data:audio/wav;base64,${chunk.base64}` },
           { shouldPlay: true }
         );
 
-        // Wait until this specific chunk is fully played
         await new Promise((resolve) => {
           newSound.setOnPlaybackStatusUpdate((playbackStatus) => {
             if (playbackStatus.isLoaded && playbackStatus.didJustFinish) {
@@ -99,8 +104,14 @@ export function SessionScreen({
       }
     }
 
-    isPlayingQueueRef.current = false;
     setIsPlayingAudio(false);
+    isPlayingQueueRef.current = false;
+
+    // Echo Guard: Briefly prevent microphone from activating immediately after speaker stops
+    setIsEchoGuardActive(true);
+    setTimeout(() => {
+      setIsEchoGuardActive(false);
+    }, 800); // 800ms guard to let room echo dissipate
   }, []);
 
   // ── WebSocket ───────────────────────────────────────────────────────────────
@@ -200,7 +211,13 @@ export function SessionScreen({
 
 
   // ── Auto-Hands-Free Loop ────────────────────────────────────────────────────
-  const canRecord = status === 'connected' && !isProcessing && !isPlayingAudio && !partnerSpeaking && !isPaused && !hasError;
+  const canRecord = status === 'connected' && 
+    !isProcessing && 
+    !isPlayingAudio && 
+    !partnerSpeaking && 
+    !isEchoGuardActive && 
+    !isPaused && 
+    !hasError;
 
   useEffect(() => {
     let mounted = true;
