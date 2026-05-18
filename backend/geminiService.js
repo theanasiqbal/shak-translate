@@ -106,7 +106,7 @@ class LiveTranslationSession {
 
     const genderDesc = gender === 'female' ? 'female'
       : gender === 'male' ? 'male'
-      : 'gender-neutral';
+        : 'gender-neutral';
 
     const ageDesc = age !== undefined ? ageBracket(Number(age)) : null;
     const descriptor = [genderDesc, ageDesc].filter(Boolean).join(' ');
@@ -116,17 +116,37 @@ class LiveTranslationSession {
       `of the target language. Do NOT change the translation content — only adapt how it sounds.`;
   }
 
+  _buildVoiceName() {
+    const { gender } = this.voiceProfile;
+    // Gemini Live API prebuilt voices:
+    // Female: 'Aoede', 'Kore'
+    // Male: 'Puck', 'Charon', 'Fenrir'
+    // Neutral: 'Orbit'
+    if (gender === 'male') return 'Puck';
+    if (gender === 'female') return 'Aoede';
+    return 'Orbit'; // neutral fallback
+  }
+
   _buildConfig() {
     const voiceInstruction = this._buildVoiceInstruction();
+    const voiceName = this._buildVoiceName();
+
     return {
       model: 'gemini-live-2.5-flash-native-audio',
       config: {
         systemInstruction: {
           parts: [{
-            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech.${voiceInstruction}`
+            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech.`
           }]
         },
         responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: voiceName
+            }
+          }
+        },
         outputAudioTranscription: {},
         inputAudioTranscription: {},
       },
