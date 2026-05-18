@@ -1,10 +1,139 @@
 require('dotenv').config();
+const http = require('http');
 const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const { processAudioChunk, warmupSession, closeSession } = require('./geminiService');
 
 const PORT = process.env.PORT || 8080;
-const wss = new WebSocketServer({ port: PORT });
+
+// ─── HTTP Server (REST endpoints) ────────────────────────────────────────────
+//
+// We need a plain HTTP server to handle the /clerk/update-profile endpoint.
+// The WebSocket server is attached to the same underlying http.Server so both
+// share the same port on Render.
+
+const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY;
+if (!CLERK_SECRET_KEY) {
+  console.error('[server] CLERK_SECRET_KEY is not set — /clerk/update-profile will not work.');
+}
+
+/**
+ * Verify a Clerk session token and return the userId.
+ * Uses the Clerk verify-token endpoint (no extra SDK needed).
+ */
+async function verifyClerkToken(token) {
+  const res = await fetch('https://api.clerk.com/v1/tokens/verify', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${CLERK_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.errors?.[0]?.message ?? `Token verification failed (${res.status})`);
+  }
+  const data = await res.json();
+  return data.sub; // userId
+}
+
+/**
+ * Write publicMetadata to a Clerk user via the Backend API.
+ */
+async function updateClerkMetadata(userId, metadata) {
+  const res = await fetch(`https://api.clerk.com/v1/users/${userId}/metadata`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${CLERK_SECRET_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ public_metadata: metadata }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.errors?.[0]?.message ?? `Metadata update failed (${res.status})`);
+  }
+  return res.json();
+}
+
+const httpServer = http.createServer(async (req, res) => {
+  // CORS for local development
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // ── POST /clerk/update-profile ─────────────────────────────────────────────
+  if (req.method === 'POST' && req.url === '/clerk/update-profile') {
+    try {
+      if (!CLERK_SECRET_KEY) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'CLERK_SECRET_KEY not configured on server.' }));
+        return;
+      }
+
+      // Parse body
+      const body = await new Promise((resolve, reject) => {
+        let data = '';
+        req.on('data', chunk => { data += chunk; });
+        req.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
+        req.on('error', reject);
+      });
+
+      const { age, gender } = body;
+      if (!age || !gender) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'age and gender are required.' }));
+        return;
+      }
+
+      // Verify the Clerk session token from Authorization header
+      const authHeader = req.headers['authorization'] ?? '';
+      const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+      if (!token) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Missing Authorization header.' }));
+        return;
+      }
+
+      const userId = await verifyClerkToken(token);
+
+      // Write to Clerk publicMetadata
+      await updateClerkMetadata(userId, {
+        age: Number(age),
+        gender,
+        onboardingComplete: true,
+      });
+
+      console.log(`[server] Updated Clerk metadata for user ${userId}: age=${age}, gender=${gender}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err) {
+      console.error('[server] /clerk/update-profile error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // Health check
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200);
+    res.end('OK');
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('Not found');
+});
+
+// Attach WebSocket server to the same underlying http.Server
+const wss = new WebSocketServer({ server: httpServer });
 
 /**
  * ARCHITECTURE: "Audio-First" floor control
@@ -122,7 +251,7 @@ wss.on('connection', (ws) => {
 
     // ── AUDIO CHUNK ──────────────────────────────────────────────────────────
     if (type === 'audio_chunk') {
-      const { sessionId, role, audioBase64, mimeType, inputLang, outputLang } = message;
+      const { sessionId, role, audioBase64, mimeType, inputLang, outputLang, speakerGender, speakerAge } = message;
       const session = sessions.get(sessionId);
 
       if (!session) {
@@ -152,6 +281,8 @@ wss.on('connection', (ws) => {
       try {
         const result = await processAudioChunk(
           sessionId, role, audioBase64, mimeType, inputLang, outputLang,
+          // Voice profile from the sender's onboarding data
+          { gender: speakerGender, age: speakerAge },
           (chunk) => {
             send(partnerSocket, {
               type: 'translated_audio_chunk',
@@ -204,5 +335,9 @@ wss.on('connection', (ws) => {
   });
 });
 
-console.log(`[server] ShakTranslate WebSocket server running on ws://localhost:${PORT}`);
+console.log(`[server] ShakTranslate server running on port ${PORT} (HTTP + WebSocket)`);
 console.log(`[server] Audio-first floor control active — partner_speaking only on real audio.`);
+
+httpServer.listen(PORT, () => {
+  console.log(`[server] HTTP + WebSocket server listening on port ${PORT}`);
+});

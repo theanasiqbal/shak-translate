@@ -74,9 +74,10 @@ function wrapPcmInWav(pcmBuffer, sampleRate = 24000) {
  * Handles automatic reconnection if the connection drops.
  */
 class LiveTranslationSession {
-  constructor(inputLang, outputLang) {
+  constructor(inputLang, outputLang, voiceProfile = {}) {
     this.inputLang = inputLang;
     this.outputLang = outputLang;
+    this.voiceProfile = voiceProfile; // { gender?: string, age?: number }
     this.session = null;
     this.isConnecting = false;
     this.connectPromise = null;
@@ -90,13 +91,39 @@ class LiveTranslationSession {
     this.currentOnAudioChunk = null;
   }
 
+  _buildVoiceInstruction() {
+    const { gender, age } = this.voiceProfile;
+    if (!gender && age === undefined) return '';
+
+    function ageBracket(a) {
+      if (a < 13) return 'young child';
+      if (a < 18) return 'teenager';
+      if (a < 30) return 'young adult in their twenties';
+      if (a < 45) return 'adult in their thirties or early forties';
+      if (a < 60) return 'middle-aged adult in their forties or fifties';
+      return 'senior adult over sixty';
+    }
+
+    const genderDesc = gender === 'female' ? 'female'
+      : gender === 'male' ? 'male'
+      : 'gender-neutral';
+
+    const ageDesc = age !== undefined ? ageBracket(Number(age)) : null;
+    const descriptor = [genderDesc, ageDesc].filter(Boolean).join(' ');
+
+    return ` Your spoken output MUST sound like a ${descriptor} person. ` +
+      `Match the natural pitch, cadence, and energy typical of a ${descriptor} native speaker ` +
+      `of the target language. Do NOT change the translation content — only adapt how it sounds.`;
+  }
+
   _buildConfig() {
+    const voiceInstruction = this._buildVoiceInstruction();
     return {
       model: 'gemini-live-2.5-flash-native-audio',
       config: {
         systemInstruction: {
           parts: [{
-            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech.`
+            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech.${voiceInstruction}`
           }]
         },
         responseModalities: ['AUDIO'],
@@ -289,11 +316,11 @@ const activeSessions = new Map();
  * @param {string} inputLang   - Speaker's language
  * @param {string} outputLang  - Listener's language
  */
-async function warmupSession(sessionId, role, inputLang, outputLang) {
+async function warmupSession(sessionId, role, inputLang, outputLang, voiceProfile = {}) {
   const key = `${sessionId}:${role}`;
   if (activeSessions.has(key)) return; // Already warmed up
 
-  const liveSession = new LiveTranslationSession(inputLang, outputLang);
+  const liveSession = new LiveTranslationSession(inputLang, outputLang, voiceProfile);
   activeSessions.set(key, liveSession);
 
   try {
@@ -319,12 +346,12 @@ async function warmupSession(sessionId, role, inputLang, outputLang) {
  * @param {Function} onAudioChunk - Callback when an audio chunk is ready
  * @returns {Promise<{ translatedText: string, originalText: string, totalChunks: number }>}
  */
-async function processAudioChunk(sessionId, role, audioBase64, mimeType, inputLang, outputLang, onAudioChunk) {
+async function processAudioChunk(sessionId, role, audioBase64, mimeType, inputLang, outputLang, voiceProfile, onAudioChunk) {
   const key = `${sessionId}:${role}`;
 
   if (!activeSessions.has(key)) {
-    // Cold path: session wasn't pre-warmed (e.g. after a reconnect)
-    const liveSession = new LiveTranslationSession(inputLang, outputLang);
+    // Cold path: session wasn’t pre-warmed (e.g. after a reconnect)
+    const liveSession = new LiveTranslationSession(inputLang, outputLang, voiceProfile || {});
     activeSessions.set(key, liveSession);
   }
 

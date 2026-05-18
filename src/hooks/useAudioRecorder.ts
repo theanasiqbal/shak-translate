@@ -13,9 +13,9 @@ const ROLLING_BUFFER_SIZE = 300;    // 30s of samples @ 100ms intervals
 const EMA_ALPHA = 0.25; // 0.25 = responsive but smooth; lower = more lag
 
 // Dual-window variance
-// Short window captures speech amplitude modulation rhythm (~600ms)
+// Short window captures speech amplitude modulation rhythm (~1000ms for slow speech)
 // Long window classifies the noise environment character (~3s)
-const SHORT_VARIANCE_WINDOW = 6;
+const SHORT_VARIANCE_WINDOW = 10;
 const LONG_VARIANCE_WINDOW = 30;
 
 // Gate limits
@@ -26,9 +26,9 @@ const CONFIDENCE_DB_RANGE = 25;
 // Ringtone / alarm / music detection
 // Any sound that stays loud for this long WITH NO DIP and no dipObserved → rejected
 // Turbulent noise mode uses a longer limit (7s) to accommodate talking-through-wind
-const CONTINUOUS_SPEECH_LIMIT_DEFAULT_MS = 5_000;
-const CONTINUOUS_SPEECH_LIMIT_TURBULENT_MS = 7_000;
-const CONTINUOUS_SPEECH_LIMIT_SPEECHLIKE_MS = 3_000;
+const CONTINUOUS_SPEECH_LIMIT_DEFAULT_MS = 6_000;
+const CONTINUOUS_SPEECH_LIMIT_TURBULENT_MS = 8_000;
+const CONTINUOUS_SPEECH_LIMIT_SPEECHLIKE_MS = 5_000;
 
 // ── Noise Type ─────────────────────────────────────────────────────────────────
 type NoiseType = 'quiet' | 'constant' | 'turbulent' | 'speech_like';
@@ -46,18 +46,21 @@ const VAD_PROFILES: Record<NoiseType, {
   silenceGate: number;
   minSnr: number;
 }> = {
-  quiet: { deltaDb: 8, varianceMin: 1.5, speechGate: 150, silenceGate: 800, minSnr: 6 },
-  constant: { deltaDb: 10, varianceMin: 3, speechGate: 200, silenceGate: 800, minSnr: 8 },
-  turbulent: { deltaDb: 14, varianceMin: 5, speechGate: 250, silenceGate: 1200, minSnr: 12 },
-  speech_like: { deltaDb: 12, varianceMin: 3, speechGate: 200, silenceGate: 900, minSnr: 15 },
+  quiet: { deltaDb: 8, varianceMin: 1.0, speechGate: 150, silenceGate: 800, minSnr: 6 },
+  constant: { deltaDb: 10, varianceMin: 2.0, speechGate: 200, silenceGate: 800, minSnr: 8 },
+  turbulent: { deltaDb: 14, varianceMin: 3.5, speechGate: 250, silenceGate: 1200, minSnr: 12 },
+  speech_like: { deltaDb: 12, varianceMin: 2.0, speechGate: 200, silenceGate: 900, minSnr: 15 },
 };
 
 interface AudioRecorderOptions {
   onSpeechDetected?: (confidence: number) => void;
   onSilenceDetected?: () => void;
+  nearFieldOnly?: boolean;
 }
 
-export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioRecorderOptions = {}) {
+const NEAR_FIELD_MIN_DB = -30; // Loosened from -22 to accommodate quieter headset mics
+
+export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFieldOnly }: AudioRecorderOptions = {}) {
   const [isRecording, setIsRecording] = useState(false);
   const [isCalibrating, setIsCalibrating] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -84,7 +87,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
   const smoothedMeterRef = useRef<number>(-60);
 
   // ── Dual-window variance buffers ───────────────────────────────────────────
-  const shortSamplesRef = useRef<number[]>([]); // 6 samples  ~600ms — speech modulation rhythm
+  const shortSamplesRef = useRef<number[]>([]); // 10 samples ~1000ms — speech modulation rhythm
   const longSamplesRef = useRef<number[]>([]); // 30 samples ~3s    — noise environment character
   const rollingBufferRef = useRef<number[]>([]); // 300 samples for recal
 
@@ -323,7 +326,12 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected }: AudioR
           // ── STEP 7: GATE LOGIC ───────────────────────────────────────────
           // isLoud uses SNR (not absolute dB) so it adapts to the room level.
           // A whisper in a -60dB room at +10dB SNR is louder than most noise.
-          const isLoud = snr > profile.deltaDb && snr > profile.minSnr;
+          let isLoud = snr > profile.deltaDb && snr > profile.minSnr;
+
+          // If nearFieldOnly is active, enforce the absolute hard gate.
+          if (nearFieldOnly && m < NEAR_FIELD_MIN_DB) {
+            isLoud = false;
+          }
 
           // Variance gate: speech has rapid amplitude modulation; flat noise doesn't.
           // Uses the profile's varianceMin so it scales to noisy environments.

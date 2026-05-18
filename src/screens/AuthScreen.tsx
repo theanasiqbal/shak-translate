@@ -15,21 +15,13 @@ import { Feather, FontAwesome } from '@expo/vector-icons';
 import { useSignIn, useSignUp, useOAuth } from '@clerk/clerk-expo';
 import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
+WebBrowser.maybeCompleteAuthSession();
 
-// Warm up web browser for OAuth
-export const useWarmUpBrowser = () => {
-  React.useEffect(() => {
-    void WebBrowser.warmUpAsync();
-    return () => {
-      void WebBrowser.coolDownAsync();
-    };
-  }, []);
-};
+
 
 
 
 export function AuthScreen() {
-  useWarmUpBrowser();
 
   const { signIn, setActive: setSignInActive, isLoaded: isSignInLoaded } = useSignIn();
   const { signUp, setActive: setSignUpActive, isLoaded: isSignUpLoaded } = useSignUp();
@@ -48,37 +40,22 @@ export function AuthScreen() {
     try {
       setLoading(true);
       setErrorMsg(null);
-      console.log(`Starting ${strategy} OAuth flow...`);
 
       const startFlow = strategy === 'google' ? startGoogleFlow : startAppleFlow;
-
-      // Simplified redirect URL for better Expo Go compatibility
-      const redirectUrl = Linking.createURL('/');
-      console.log('Redirect URL:', redirectUrl);
+      const redirectUrl = Linking.createURL('/oauth-callback');
 
       const result = await startFlow({ redirectUrl });
-      
-      // Do NOT use JSON.stringify(result) as it can crash on Clerk objects
-      console.log('OAuth Flow Result:', !!result.createdSessionId ? 'Success' : 'Incomplete');
-      console.log('SignIn Status:', result.signIn?.status);
-      console.log('SignUp Status:', result.signUp?.status);
-
-      const { createdSessionId, signIn, signUp, setActive } = result;
+      const { createdSessionId, setActive, signIn, signUp } = result;
 
       if (createdSessionId) {
-        console.log('Success: Session created, activating...');
         await setActive!({ session: createdSessionId });
       } else if (signIn || signUp) {
-        console.log('Incomplete: SignIn or SignUp required.');
-        setErrorMsg(`Incomplete flow: ${signIn?.status || signUp?.status || 'check logs'}`);
+        setErrorMsg('Additional setup required.');
       } else {
-        console.log('No result from OAuth flow');
-        setErrorMsg('OAuth flow was cancelled or failed to return a result.');
+        setErrorMsg('Sign in was cancelled.');
       }
     } catch (err: any) {
-      console.error('OAuth error full detail:', err);
-      // Fallback for objects that don't stringify well
-      const msg = err.errors?.[0]?.message || err.message || 'OAuth flow failed or was cancelled';
+      const msg = err?.errors?.[0]?.message ?? err?.message ?? 'OAuth failed';
       setErrorMsg(msg);
     } finally {
       setLoading(false);
@@ -87,7 +64,11 @@ export function AuthScreen() {
 
   const handleContinue = async () => {
     if (!isSignInLoaded || !isSignUpLoaded) return;
-    if (!identifier) {
+    if (!signIn || !signUp) {
+      setErrorMsg('Auth not ready. Please restart the app.');
+      return;
+    }
+    if (!identifier.trim()) {
       setErrorMsg('Please enter your email');
       return;
     }

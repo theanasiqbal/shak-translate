@@ -37,7 +37,9 @@ interface WebSocketContextType {
     inputLang: string,
     outputLang: string,
     role: string,
-    sid: string
+    sid: string,
+    speakerGender?: string,
+    speakerAge?: number
   ) => void;
   claimTurn: (role: string, sid: string, confidence?: number) => void;
   releaseTurn: (role: string, sid: string) => void;
@@ -202,7 +204,9 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       inputLang: string,
       outputLang: string,
       role: string,
-      sid: string
+      sid: string,
+      speakerGender?: string,
+      speakerAge?: number
     ) => {
       setIsProcessing(true);
       websocketService.send({
@@ -213,6 +217,9 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         mimeType,
         inputLang,
         outputLang,
+        // Voice profile fields — optional, backend falls back to neutral if missing
+        ...(speakerGender ? { speakerGender } : {}),
+        ...(speakerAge !== undefined ? { speakerAge } : {}),
       });
     },
     []

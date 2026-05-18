@@ -55,7 +55,12 @@ class WebSocketService {
     }
     if (this.ws) {
       this.ws.onclose = null; // prevent close handler from firing on intentional disconnect
-      this.ws.close();
+      this.ws.onerror = null; // prevent error handler from firing on intentional disconnect
+      try {
+        this.ws.close(1000, 'User disconnected');
+      } catch (e) {
+        console.warn('[WebSocketService] Error during close:', e);
+      }
       this.ws = null;
     }
   }

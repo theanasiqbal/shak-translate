@@ -6,6 +6,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Audio } from 'expo-av';
 import { Feather } from '@expo/vector-icons';
+import { useUser } from '@clerk/clerk-expo';
 import Animated, {
   useSharedValue, useAnimatedStyle,
   withRepeat, withSequence, withTiming, Easing,
@@ -38,6 +39,13 @@ export function SessionScreen({
   partnerLang,
   onEnd,
 }: SessionScreenProps) {
+  const { user } = useUser();
+
+  // Derive voice profile from Clerk metadata (set during onboarding)
+  const meta = user?.publicMetadata as any;
+  const speakerGender: string | undefined = meta?.gender;
+  const speakerAge: number | undefined =
+    meta?.age !== undefined ? Number(meta.age) : undefined;
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [currentSentText, setCurrentSentText] = useState<string | null>(null);
   const [currentReceivedText, setCurrentReceivedText] = useState<string | null>(null);
@@ -118,12 +126,18 @@ export function SessionScreen({
   const { status, isProcessing, sendAudioChunk, endSession } = useWebSocket({
     onTranslatedAudioChunk: useCallback((payload: any) => {
       setPartnerSpeaking(false);
+      // Ignore empty audio payloads (often caused by background noise rejection on backend)
+      if (!payload.audioBase64 && !payload.text?.trim()) return;
+      
       audioQueueRef.current.push({ base64: payload.audioBase64, index: payload.index, text: payload.text });
       processAudioQueue();
     }, [processAudioQueue]),
 
     onTranslatedAudioFinal: useCallback((original: string, translated: string) => {
       setPartnerSpeaking(false);
+      // Ignore completely empty translations (e.g. background noise)
+      if (!original.trim() && !translated.trim()) return;
+
       setTranscript(prev => [
         { id: `recv-${Date.now()}`, direction: 'received', original, translated, timestamp: Date.now() },
         ...prev,
@@ -131,6 +145,8 @@ export function SessionScreen({
     }, []),
 
     onTranscript: useCallback((original: string, translated: string) => {
+      // Ignore completely empty transcripts
+      if (!original.trim() && !translated.trim()) return;
       setCurrentSentText(`${original} → ${translated}`);
     }, []),
 
@@ -172,18 +188,19 @@ export function SessionScreen({
       onSilenceDetected: useCallback(() => {
         if (silenceCallbackRef.current) silenceCallbackRef.current();
       }, []),
+      nearFieldOnly: true,
     });
 
   const handleSilenceStop = useCallback(async () => {
     try {
       const { base64, mimeType } = await stopRecording();
       if (base64 && base64.length > 100) {
-        sendAudioChunk(base64, mimeType, myLang, partnerLang, role, sessionId);
+        sendAudioChunk(base64, mimeType, myLang, partnerLang, role, sessionId, speakerGender, speakerAge);
       }
     } catch (e) {
       console.warn('[SessionScreen] Silence stop error:', e);
     }
-  }, [stopRecording, sendAudioChunk, myLang, partnerLang, role, sessionId]);
+  }, [stopRecording, sendAudioChunk, myLang, partnerLang, role, sessionId, speakerGender, speakerAge]);
 
   useEffect(() => {
     silenceCallbackRef.current = handleSilenceStop;
@@ -219,23 +236,36 @@ export function SessionScreen({
     !isPaused && 
     !hasError;
 
+  const isTransitioningRef = useRef(false);
+
   useEffect(() => {
     let mounted = true;
     const manageRecordingState = async () => {
+      if (isTransitioningRef.current) return;
+      
       if (canRecord && !isRecording) {
         try {
+          isTransitioningRef.current = true;
           setCurrentSentText(null);
           setCurrentReceivedText(null);
           await startRecording();
         } catch (e) {
           console.warn('Auto start error:', e);
           if (mounted) setHasError(true);
+        } finally {
+          isTransitioningRef.current = false;
         }
       } else if (!canRecord && isRecording) {
         try {
+          isTransitioningRef.current = true;
           await stopRecording();
         } catch (e) {
-          console.warn('Auto stop error:', e);
+          // Ignore "No active recording" as it's a side-effect of quick state changes
+          if (!(e instanceof Error && e.message.includes('No active recording'))) {
+            console.warn('Auto stop error:', e);
+          }
+        } finally {
+          isTransitioningRef.current = false;
         }
       }
     };
