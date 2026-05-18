@@ -349,8 +349,22 @@ async function warmupSession(sessionId, role, inputLang, outputLang, voiceProfil
 async function processAudioChunk(sessionId, role, audioBase64, mimeType, inputLang, outputLang, voiceProfile, onAudioChunk) {
   const key = `${sessionId}:${role}`;
 
+  if (activeSessions.has(key)) {
+    const existing = activeSessions.get(key);
+    // Warmup creates the Gemini session before gender/age are known.
+    // On the first audio_chunk that carries a voice profile, rebuild
+    // the session so the correct voice instruction is applied.
+    const cachedGender = existing.voiceProfile && existing.voiceProfile.gender;
+    const incomingGender = voiceProfile && voiceProfile.gender;
+    if (!cachedGender && incomingGender) {
+      console.log(`[geminiService] Voice profile for ${role}: gender=${incomingGender}, age=${voiceProfile.age} — rebuilding session.`);
+      existing.close();
+      activeSessions.delete(key);
+    }
+  }
+
   if (!activeSessions.has(key)) {
-    // Cold path: session wasn’t pre-warmed (e.g. after a reconnect)
+    // Cold path: not pre-warmed, or just rebuilt above for voice profile
     const liveSession = new LiveTranslationSession(inputLang, outputLang, voiceProfile || {});
     activeSessions.set(key, liveSession);
   }
