@@ -8,6 +8,7 @@ import {
   Platform,
   ActivityIndicator,
   Alert,
+  PanResponder,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -47,6 +48,30 @@ export function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
   const TRACK_WIDTH = 280; // logical px — matches styles.track width
   const THUMB_SIZE = 28;
   const thumbLeft = agePercent * (TRACK_WIDTH - THUMB_SIZE);
+
+  const ageRef = React.useRef(age);
+  ageRef.current = age;
+
+  const panResponder = React.useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderGrant: (evt) => {
+        // Optional: jump to tap location if user taps the track
+        // evt.nativeEvent.locationX can be tricky if they tap the thumb vs the track.
+        // For simplicity, we just establish the starting age for the drag.
+        ageRef.current = age;
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        const deltaPercent = gestureState.dx / TRACK_WIDTH;
+        const deltaAge = Math.round(deltaPercent * (MAX_AGE - MIN_AGE));
+        let newAge = ageRef.current + deltaAge;
+        if (newAge < MIN_AGE) newAge = MIN_AGE;
+        if (newAge > MAX_AGE) newAge = MAX_AGE;
+        setAge(newAge);
+      },
+    })
+  ).current;
 
   // Increment / Decrement buttons as the slider substitute
   const decAge = () => setAge((a) => Math.max(MIN_AGE, a - 1));
@@ -161,7 +186,7 @@ export function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
           </View>
 
           {/* Visual track */}
-          <View style={styles.trackContainer}>
+          <View style={styles.trackContainer} {...panResponder.panHandlers}>
             <View style={styles.track}>
               {/* Filled portion */}
               <View style={[styles.trackFill, { width: `${agePercent * 100}%` }]} />
@@ -316,7 +341,7 @@ const styles = StyleSheet.create({
   ageUnit: { color: 'rgba(255,255,255,0.3)', fontSize: 13, fontWeight: '500', marginTop: -4 },
 
   // Track
-  trackContainer: { alignItems: 'center', marginBottom: 20 },
+  trackContainer: { alignItems: 'center', marginBottom: 20, paddingVertical: 16 },
   track: {
     width: TRACK_WIDTH, height: 6, borderRadius: 3,
     backgroundColor: 'rgba(255,255,255,0.08)',

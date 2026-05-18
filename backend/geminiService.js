@@ -91,30 +91,6 @@ class LiveTranslationSession {
     this.currentOnAudioChunk = null;
   }
 
-  _buildVoiceInstruction() {
-    const { gender, age } = this.voiceProfile;
-    if (!gender && age === undefined) return '';
-
-    function ageBracket(a) {
-      if (a < 13) return 'young child';
-      if (a < 18) return 'teenager';
-      if (a < 30) return 'young adult in their twenties';
-      if (a < 45) return 'adult in their thirties or early forties';
-      if (a < 60) return 'middle-aged adult in their forties or fifties';
-      return 'senior adult over sixty';
-    }
-
-    const genderDesc = gender === 'female' ? 'female'
-      : gender === 'male' ? 'male'
-        : 'gender-neutral';
-
-    const ageDesc = age !== undefined ? ageBracket(Number(age)) : null;
-    const descriptor = [genderDesc, ageDesc].filter(Boolean).join(' ');
-
-    return ` Your spoken output MUST sound like a ${descriptor} person. ` +
-      `Match the natural pitch, cadence, and energy typical of a ${descriptor} native speaker ` +
-      `of the target language. Do NOT change the translation content — only adapt how it sounds.`;
-  }
 
   _buildVoiceName() {
     const { gender } = this.voiceProfile;
@@ -128,7 +104,6 @@ class LiveTranslationSession {
   }
 
   _buildConfig() {
-    const voiceInstruction = this._buildVoiceInstruction();
     const voiceName = this._buildVoiceName();
 
     return {
