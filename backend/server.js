@@ -146,20 +146,30 @@ const httpServer = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ server: httpServer });
 
 /**
- * ARCHITECTURE: "Audio-First" floor control
+ * ARCHITECTURE: Independent per-role queues + "Audio-First" floor control
  *
- * partner_speaking is ONLY sent when real audio_chunk arrives at the server.
- * VAD claim_turn messages are completely ignored — they were the source of
- * all false "Partner is Speaking" states (noise, leakage, ringtones).
+ * Each role (host / guest) has its own FIFO queue and its own isProcessing flag.
+ * The two drain loops run concurrently through their separate Gemini Live sessions,
+ * so A's sentences and B's sentences are never blocked by each other.
  *
  * Flow:
- *  1. Device A speaks → VAD detects → silence → stopRecording → sendAudioChunk
- *  2. Server receives audio_chunk → sends partner_speaking to B (real signal)
- *  3. Server processes → sends results to B, lock_released to B
- *  4. B clears partnerSpeaking → resumes recording
+ *  1. Device A speaks → VAD silence → stopRecording → sendAudioChunk
+ *  2. Server enqueues chunk into roleState[A].queue
+ *  3. drainRoleQueue(A) starts (if not already running)
+ *  4. Server → B: partner_speaking  (real audio arrived — Audio-First signal)
+ *  5. Server → Gemini-A: translate
+ *  6. Server → B: translated_audio_chunks + translated_audio_final
+ *  7. If A's queue is now empty: Server → B: lock_released
+ *     Otherwise: dequeue next, goto 4
+ *
+ *  B can speak at any point — B's chunks go into roleState[B].queue
+ *  and drainRoleQueue(B) runs concurrently with drainRoleQueue(A).
  */
 
 const sessions = new Map();
+
+// Maximum number of queued sentences per role before oldest is dropped.
+const MAX_QUEUE_DEPTH = 5;
 
 function send(ws, payload) {
   if (ws && ws.readyState === ws.OPEN) {
@@ -171,9 +181,92 @@ function getPartnerSocket(session, role) {
   return role === 'host' ? session.guest : session.host;
 }
 
+function getPartnerRole(role) {
+  return role === 'host' ? 'guest' : 'host';
+}
+
+/**
+ * Drain one role's queue sequentially.
+ * This function is intentionally NOT awaited by the caller — it runs as a
+ * detached async loop so that host and guest queues drain concurrently.
+ *
+ * Safety: reads session.roleState[role].queue directly. Callers clear
+ * both queues in cleanupSession() to stop the loop on the next iteration.
+ */
+async function drainRoleQueue(session, sessionId, role) {
+  const rs = session.roleState[role];
+  if (rs.isProcessing) return; // Another call is already draining this lane
+
+  rs.isProcessing = true;
+  const senderSocket = () => role === 'host' ? session.host : session.guest;
+  const partnerSocket = () => getPartnerSocket(session, role);
+
+  while (rs.queue.length > 0) {
+    // Re-check session is still alive (cleanupSession sets queue to [])
+    if (!sessions.has(sessionId)) break;
+
+    const entry = rs.queue.shift();
+
+    // ✅ partner_speaking fires only on real audio — Audio-First floor control
+    send(partnerSocket(), { type: 'partner_speaking' });
+    send(senderSocket(), { type: 'processing_started' });
+    // Tell sender how many more are still waiting after this one
+    send(senderSocket(), { type: 'queue_depth', depth: rs.queue.length });
+
+    try {
+      const result = await processAudioChunk(
+        sessionId, role,
+        entry.audioBase64, entry.mimeType,
+        entry.inputLang, entry.outputLang,
+        { gender: entry.speakerGender, age: entry.speakerAge },
+        (chunk) => {
+          send(partnerSocket(), {
+            type: 'translated_audio_chunk',
+            audioBase64: chunk.audioBase64,
+            mimeType: 'audio/wav',
+            index: chunk.index,
+            text: chunk.text,
+          });
+        }
+      );
+
+      send(senderSocket(), { type: 'processing_done' });
+      send(senderSocket(), {
+        type: 'transcript',
+        originalText: result.originalText,
+        translatedText: result.translatedText,
+      });
+      send(partnerSocket(), {
+        type: 'translated_audio_final',
+        originalText: result.originalText,
+        translatedText: result.translatedText,
+      });
+
+      // lock_released only fires when this role's queue is fully drained
+      // (partner's mic is unblocked only after all queued sentences are done)
+      if (rs.queue.length === 0) {
+        send(partnerSocket(), { type: 'lock_released' });
+      }
+
+    } catch (err) {
+      console.error(`[server] Gemini error for ${role} in ${sessionId}:`, err.message);
+      send(senderSocket(), { type: 'error', message: 'AI processing failed: ' + err.message });
+      // Always unblock partner on error — don't leave them stuck
+      send(partnerSocket(), { type: 'lock_released' });
+    }
+  }
+
+  rs.isProcessing = false;
+  console.log(`[server] drainRoleQueue finished for ${role} in ${sessionId}`);
+}
+
 function cleanupSession(sessionId, disconnectedRole) {
   const session = sessions.get(sessionId);
   if (!session) return;
+
+  // Immediately empty both queues so any in-flight drain loops exit on next iteration
+  session.roleState.host.queue = [];
+  session.roleState.guest.queue = [];
 
   const partnerSocket = getPartnerSocket(session, disconnectedRole);
   send(partnerSocket, {
@@ -215,7 +308,11 @@ wss.on('connection', (ws) => {
       sessions.set(sessionId, {
         host: ws, hostLang: lang,
         guest: null, guestLang: null,
-        isProcessing: false,
+        // Per-role independent queue state — replaces the old global isProcessing
+        roleState: {
+          host:  { queue: [], isProcessing: false },
+          guest: { queue: [], isProcessing: false },
+        },
       });
       currentSessionId = sessionId;
       currentRole = 'host';
@@ -273,52 +370,26 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      // If already processing, discard silently (prevents overlap)
-      // The client will naturally send the next chunk after the current one plays.
-      if (session.isProcessing) {
-        console.log(`[server] Session ${sessionId} busy — discarding ${role} chunk`);
-        send(ws, { type: 'processing_done' }); // unblock sender's isProcessing state
-        return;
+      const rs = session.roleState[role];
+
+      // Drop the oldest entry if this role's queue is full (memory safety)
+      if (rs.queue.length >= MAX_QUEUE_DEPTH) {
+        rs.queue.shift();
+        console.warn(`[server] Queue overflow for ${role} in ${sessionId} — dropped oldest entry`);
       }
 
-      session.isProcessing = true;
-      const partnerSocket = getPartnerSocket(session, role);
+      // Enqueue the incoming chunk
+      rs.queue.push({ audioBase64, mimeType, inputLang, outputLang, speakerGender, speakerAge });
 
-      // ✅ THIS is the only place partner_speaking fires — real audio arrived.
-      send(partnerSocket, { type: 'partner_speaking' });
-      send(ws, { type: 'processing_started' });
+      // Inform the sender of how many sentences are waiting behind this one
+      // (0 means this is the only one — being processed immediately)
+      send(ws, { type: 'queue_depth', depth: rs.queue.length - 1 });
 
-      try {
-        const result = await processAudioChunk(
-          sessionId, role, audioBase64, mimeType, inputLang, outputLang,
-          // Voice profile from the sender's onboarding data
-          { gender: speakerGender, age: speakerAge },
-          (chunk) => {
-            send(partnerSocket, {
-              type: 'translated_audio_chunk',
-              audioBase64: chunk.audioBase64,
-              mimeType: 'audio/wav',
-              index: chunk.index,
-              text: chunk.text,
-            });
-          }
-        );
+      console.log(`[server] Queued chunk for ${role} in ${sessionId} (queue length: ${rs.queue.length})`);
 
-        send(ws, { type: 'processing_done' });
-        send(ws, { type: 'transcript', originalText: result.originalText, translatedText: result.translatedText });
-        send(partnerSocket, { type: 'translated_audio_final', originalText: result.originalText, translatedText: result.translatedText });
-
-        // Tell partner the lock is released so they can resume recording
-        // (in case translated_audio_final didn't arrive cleanly)
-        send(partnerSocket, { type: 'lock_released' });
-
-      } catch (err) {
-        console.error('[server] Gemini error:', err.message);
-        send(ws, { type: 'error', message: 'AI processing failed: ' + err.message });
-        // Make sure partner isn't stuck
-        send(partnerSocket, { type: 'lock_released' });
-      } finally {
-        session.isProcessing = false;
+      // Start draining if this role's lane is idle
+      if (!rs.isProcessing) {
+        drainRoleQueue(session, sessionId, role);
       }
       return;
     }
