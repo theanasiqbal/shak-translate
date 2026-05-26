@@ -5,7 +5,7 @@ import { Platform } from 'react-native';
 
 // ── VAD Constants ──────────────────────────────────────────────────────────────
 // Core timing
-const CALIBRATION_DURATION_MS = 3000;   // 3s ambient sample on first start
+const CALIBRATION_DURATION_MS = 1500;   // 1.5s ambient sample on first start
 const RECAL_INTERVAL_MS = 15_000; // recalibrate every 15s (was 30s) to catch env changes faster
 const ROLLING_BUFFER_SIZE = 300;    // 30s of samples @ 100ms intervals
 
@@ -46,10 +46,10 @@ const VAD_PROFILES: Record<NoiseType, {
   silenceGate: number;
   minSnr: number;
 }> = {
-  quiet: { deltaDb: 8, varianceMin: 1.0, speechGate: 150, silenceGate: 800, minSnr: 6 },
-  constant: { deltaDb: 10, varianceMin: 2.0, speechGate: 200, silenceGate: 800, minSnr: 8 },
+  quiet: { deltaDb: 8, varianceMin: 1.0, speechGate: 150, silenceGate: 1000, minSnr: 6 },
+  constant: { deltaDb: 10, varianceMin: 2.0, speechGate: 200, silenceGate: 1000, minSnr: 8 },
   turbulent: { deltaDb: 14, varianceMin: 3.5, speechGate: 250, silenceGate: 1200, minSnr: 12 },
-  speech_like: { deltaDb: 12, varianceMin: 2.0, speechGate: 200, silenceGate: 900, minSnr: 15 },
+  speech_like: { deltaDb: 12, varianceMin: 2.0, speechGate: 200, silenceGate: 1000, minSnr: 15 },
 };
 
 interface AudioRecorderOptions {
@@ -96,6 +96,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
 
   // ── Turn state ─────────────────────────────────────────────────────────────
   const speechStartRef = useRef<number | null>(null);
+  const actualSpeechStartRef = useRef<number | null>(null); // NEW: timestamp when speech is confirmed
   const silenceStartRef = useRef<number | null>(null);
   const hasSpokenRef = useRef<boolean>(false);
   const turnClaimedRef = useRef<boolean>(false);
@@ -162,6 +163,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
     hasSpokenRef.current = false;
     turnClaimedRef.current = false;
     speechStartRef.current = null;
+    actualSpeechStartRef.current = null;
     silenceStartRef.current = null;
 
     // Ringtone detection
@@ -395,6 +397,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
               } else if (now - speechStartRef.current > profile.speechGate) {
                 // Gate passed → confirmed speech onset
                 hasSpokenRef.current = true;
+                actualSpeechStartRef.current = now; // Mark exactly when speech started
                 dipObservedRef.current = false; // reset dip tracker for this new turn
                 setIsSpeaking(true);
 
@@ -455,7 +458,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
   };
 
   // ── Stop Recording ─────────────────────────────────────────────────────────
-  const stopRecording = async (): Promise<{ base64: string; mimeType: string }> => {
+  const stopRecording = async (): Promise<{ base64: string; mimeType: string; speechStartOffsetMs: number }> => {
     if (isStoppingRef.current) {
       throw new Error('Already stopping recording');
     }
@@ -488,11 +491,45 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
 
       const uri = recordingRef.current.getURI();
 
-      // Restore playback audio mode
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
+      if (!uri) {
+        throw new Error('Recording stopped but no URI was available.');
+      }
+
+      setRecordingUri(uri);
+
+      const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
+      const mimeType = uri.endsWith('.m4a') ? 'audio/mp4' : 'audio/webm';
+      
+      const speechStartOffsetMs = actualSpeechStartRef.current
+        ? Math.max(0, actualSpeechStartRef.current - recordingStartTime.current - 200)
+        : 0;
+
+      return { base64, mimeType, speechStartOffsetMs };
+    } finally {
+      recordingRef.current = null;
+      cleanupRecording();
+      isStoppingRef.current = false;
+    }
+  };
+
+  // ── Force Stop ─────────────────────────────────────────────────────────────
+  const forceStop = async (): Promise<{ base64: string; mimeType: string; speechStartOffsetMs: number }> => {
+    hasSpokenRef.current = false;
+    turnClaimedRef.current = false;
+    
+    if (!recordingRef.current) {
+      throw new Error('No active recording found');
+    }
+    
+    isStoppingRef.current = true;
+    try {
+      try {
+        await recordingRef.current.stopAndUnloadAsync();
+      } catch (err) {
+        console.warn('[useAudioRecorder] Error stopping recording natively (forceStop):', err);
+      }
+
+      const uri = recordingRef.current.getURI();
 
       if (!uri) {
         throw new Error('Recording stopped but no URI was available.');
@@ -503,11 +540,16 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
       const base64 = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const mimeType = uri.endsWith('.m4a') ? 'audio/mp4' : 'audio/webm';
 
-      return { base64, mimeType };
+      const speechStartOffsetMs = actualSpeechStartRef.current
+        ? Math.max(0, actualSpeechStartRef.current - recordingStartTime.current - 200)
+        : 0;
+
+      return { base64, mimeType, speechStartOffsetMs };
     } finally {
       recordingRef.current = null;
-      cleanupRecording();
+      // Do NOT call cleanupRecording() so the loop can restart naturally
       isStoppingRef.current = false;
+      setIsRecording(false); // Make sure isRecording goes false so auto-loop can restart it
     }
   };
 
@@ -536,6 +578,7 @@ export function useAudioRecorder({ onSpeechDetected, onSilenceDetected, nearFiel
     isSpeaking,
     startRecording,
     stopRecording,
+    forceStop,
     audioLevel,
   };
 }

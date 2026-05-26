@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { ClerkProvider, SignedIn, SignedOut, useUser } from '@clerk/clerk-expo';
 import { tokenCache } from './src/utils/tokenCache';
@@ -7,6 +8,8 @@ import { SessionScreen } from './src/screens/SessionScreen';
 import { AuthScreen } from './src/screens/AuthScreen';
 import { ProfileScreen } from './src/screens/ProfileScreen';
 import { OnboardingScreen } from './src/screens/OnboardingScreen';
+import { ConversationDetailScreen } from './src/screens/ConversationDetailScreen';
+import { AudioRecordingsScreen } from './src/screens/AudioRecordingsScreen';
 import { WebSocketProvider } from './src/contexts/WebSocketContext';
 import * as WebBrowser from 'expo-web-browser';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -14,7 +17,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 WebBrowser.maybeCompleteAuthSession();
 
 
-type AppScreen = 'onboarding' | 'home' | 'session' | 'profile';
+type AppScreen = 'onboarding' | 'home' | 'session' | 'profile' | 'conversation' | 'recordings';
 
 interface SessionParams {
   sessionId: string;
@@ -36,6 +39,8 @@ function MainApp() {
   const isOnboarded = !!(user?.publicMetadata as any)?.onboardingComplete;
   const [screen, setScreen] = useState<AppScreen>(isOnboarded ? 'home' : 'onboarding');
   const [sessionParams, setSessionParams] = useState<SessionParams | null>(null);
+  const [activeConversation, setActiveConversation] = useState<{ id: string, myUserId: string } | null>(null);
+  const [activeRecordings, setActiveRecordings] = useState<{ id: string, myUserId: string, myLang: string, partnerLang: string } | null>(null);
 
   // If Clerk is still loading the user, render nothing to avoid flicker
   if (!isLoaded) return null;
@@ -59,6 +64,14 @@ function MainApp() {
         <HomeScreen
           onSessionReady={handleSessionReady}
           onOpenProfile={() => setScreen('profile')}
+          onOpenConversation={(id, myUserId) => {
+            setActiveConversation({ id, myUserId });
+            setScreen('conversation');
+          }}
+          onOpenRecordings={(id, myUserId, myLang, partnerLang) => {
+            setActiveRecordings({ id, myUserId, myLang, partnerLang });
+            setScreen('recordings');
+          }}
         />
       )}
       {screen === 'profile' && (
@@ -73,22 +86,46 @@ function MainApp() {
           onEnd={handleEndSession}
         />
       )}
+      {screen === 'conversation' && activeConversation && (
+        <ConversationDetailScreen
+          conversationId={activeConversation.id}
+          myUserId={activeConversation.myUserId}
+          onBack={() => {
+            setActiveConversation(null);
+            setScreen('home');
+          }}
+        />
+      )}
+      {screen === 'recordings' && activeRecordings && (
+        <AudioRecordingsScreen
+          conversationId={activeRecordings.id}
+          myUserId={activeRecordings.myUserId}
+          myLang={activeRecordings.myLang}
+          partnerLang={activeRecordings.partnerLang}
+          onBack={() => {
+            setActiveRecordings(null);
+            setScreen('home');
+          }}
+        />
+      )}
     </WebSocketProvider>
   );
 }
 
 export default function App() {
   return (
-    <SafeAreaProvider>
-      <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
-        <StatusBar style="light" />
-        <SignedIn>
-          <MainApp />
-        </SignedIn>
-        <SignedOut>
-          <AuthScreen />
-        </SignedOut>
-      </ClerkProvider>
-    </SafeAreaProvider>
+    <View style={{ flex: 1, backgroundColor: '#0A0A0A' }}>
+      <SafeAreaProvider>
+        <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+          <StatusBar style="light" />
+          <SignedIn>
+            <MainApp />
+          </SignedIn>
+          <SignedOut>
+            <AuthScreen />
+          </SignedOut>
+        </ClerkProvider>
+      </SafeAreaProvider>
+    </View>
   );
 }

@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@google/genai": "^1.44.0",
+    "@supabase/supabase-js": "^2.106.0",
     "dotenv": "^16.4.5",
+    "googleapis": "^171.4.0",
     "uuid": "^11.0.5",
     "ws": "^8.18.0"
   }

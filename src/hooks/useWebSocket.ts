@@ -13,14 +13,14 @@ interface UseWebSocketOptions {
   onPartnerSpeaking?: () => void;
   onTurnRejected?: () => void;
   onLockReleased?: () => void;
+  onQueueResumed?: () => void;
   onSessionReadyEvent?: (partnerLang: string) => void;
 }
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
   const context = useWebSocketContext();
-  const hookId = useId(); // Unique ID for this hook instance
+  const hookId = useId();
 
-  // Register callbacks with the provider whenever options change
   useEffect(() => {
     context.registerCallbacks(hookId, options);
     return () => {
@@ -33,9 +33,13 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     sessionId: context.sessionId,
     partnerLang: context.partnerLang,
     isProcessing: context.isProcessing,
+    queueDepth: context.queueDepth,
     createSession: context.createSession,
     joinSession: context.joinSession,
     sendAudioChunk: context.sendAudioChunk,
+    sendPauseQueue: context.sendPauseQueue,
+    sendResumeQueue: context.sendResumeQueue,
+    sendCancelQueue: context.sendCancelQueue,
     claimTurn: context.claimTurn,
     releaseTurn: context.releaseTurn,
     endSession: context.endSession,

@@ -60,8 +60,20 @@ export function SessionScreen({
   // ── Audio Playback ──────────────────────────────────────────────────────────
   const audioQueueRef = useRef<{ base64: string; index: number; text: string }[]>([]);
   const isPlayingQueueRef = useRef(false);
+  const currentSoundRef = useRef<Audio.Sound | null>(null);
+  const isBargedInRef = useRef(false); // true while partner is speaking (barge-in paused)
 
-  const [isEchoGuardActive, setIsEchoGuardActive] = useState(false);
+  // Set unified audio mode once — measurement mode routes to speaker even with mic active
+  useEffect(() => {
+    Audio.setAudioModeAsync({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: true,
+      ...(Platform.OS === 'ios' ? { iosCategoryMode: 'voiceChat' } : {}),
+    }).catch(e => console.warn('[SessionScreen] Audio mode error:', e));
+  }, []);
 
   const processAudioQueue = useCallback(async () => {
     if (isPlayingQueueRef.current || audioQueueRef.current.length === 0) return;
@@ -69,19 +81,12 @@ export function SessionScreen({
     isPlayingQueueRef.current = true;
     setIsPlayingAudio(true);
 
-    // Set audio mode once at the start of the queue
-    try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
-      });
-    } catch (e) {
-      console.warn('[SessionScreen] Audio mode error:', e);
-    }
-
     while (audioQueueRef.current.length > 0) {
+      // Wait while barged-in (user is speaking — sound is paused by handleBargeIn)
+      while (isBargedInRef.current) {
+        await new Promise(r => setTimeout(r, 80));
+      }
+
       audioQueueRef.current.sort((a, b) => a.index - b.index);
       const chunk = audioQueueRef.current.shift();
       if (!chunk) continue;
@@ -92,60 +97,54 @@ export function SessionScreen({
         setCurrentReceivedText((prev) => (prev ? prev + ' ' + chunk.text : chunk.text));
       }
 
-      try {
-        const { sound: newSound } = await Audio.Sound.createAsync(
-          { uri: `data:audio/wav;base64,${chunk.base64}` },
-          { shouldPlay: true }
-        );
+      if (chunk.base64) {
+        try {
+          const { sound: newSound } = await Audio.Sound.createAsync(
+            { uri: `data:audio/wav;base64,${chunk.base64}` },
+            { shouldPlay: false } // load first, play after barge-in check
+          );
+          currentSoundRef.current = newSound;
 
-        await new Promise((resolve) => {
-          newSound.setOnPlaybackStatusUpdate((playbackStatus) => {
-            if (playbackStatus.isLoaded && playbackStatus.didJustFinish) {
-              resolve(true);
-            }
+          // Start playing — may be paused immediately by barge-in
+          await newSound.playAsync();
+
+          await new Promise((resolve) => {
+            newSound.setOnPlaybackStatusUpdate((s) => {
+              if (s.isLoaded && s.didJustFinish) resolve(true);
+            });
           });
-        });
 
-        await newSound.unloadAsync();
-      } catch (e) {
-        console.error('[SessionScreen] Playback queue error:', e);
+          await newSound.unloadAsync();
+          currentSoundRef.current = null;
+        } catch (e) {
+          console.error('[SessionScreen] Playback queue error:', e);
+          currentSoundRef.current = null;
+        }
       }
     }
 
     setIsPlayingAudio(false);
     isPlayingQueueRef.current = false;
-
-    // Echo Guard: Briefly prevent microphone from activating immediately after speaker stops
-    setIsEchoGuardActive(true);
-    setTimeout(() => {
-      setIsEchoGuardActive(false);
-    }, 800); // 800ms guard to let room echo dissipate
   }, []);
 
-  // ── WebSocket ───────────────────────────────────────────────────────────────
-  const { status, isProcessing, sendAudioChunk, endSession } = useWebSocket({
+  const { status, isProcessing, queueDepth, sendAudioChunk, sendPauseQueue, sendResumeQueue, endSession } = useWebSocket({
     onTranslatedAudioChunk: useCallback((payload: any) => {
       setPartnerSpeaking(false);
-      // Ignore empty audio payloads (often caused by background noise rejection on backend)
       if (!payload.audioBase64 && !payload.text?.trim()) return;
-      
       audioQueueRef.current.push({ base64: payload.audioBase64, index: payload.index, text: payload.text });
       processAudioQueue();
     }, [processAudioQueue]),
 
     onTranslatedAudioFinal: useCallback((original: string, translated: string) => {
       setPartnerSpeaking(false);
-      // Ignore completely empty translations (e.g. background noise)
-      if (!original.trim() && !translated.trim()) return;
-
-      setTranscript(prev => [
-        { id: `recv-${Date.now()}`, direction: 'received', original, translated, timestamp: Date.now() },
-        ...prev,
-      ]);
+      if (translated.trim().length < 2) return;
+      setTranscript(prev => {
+        if (prev.length > 0 && prev[0].translated === translated) return prev;
+        return [{ id: `recv-${Date.now()}`, direction: 'received', original, translated, timestamp: Date.now() }, ...prev];
+      });
     }, []),
 
     onTranscript: useCallback((original: string, translated: string) => {
-      // Ignore completely empty transcripts
       if (!original.trim() && !translated.trim()) return;
       setCurrentSentText(`${original} → ${translated}`);
     }, []),
@@ -160,42 +159,71 @@ export function SessionScreen({
       Alert.alert('Error', msg);
     }, []),
 
-    // partner_speaking now ONLY fires when real audio arrives at the server.
-    // No more false positives from VAD noise or cross-device leakage.
-    onPartnerSpeaking: useCallback(() => {
-      setPartnerSpeaking(true);
-    }, []),
+    onPartnerSpeaking: useCallback(() => { setPartnerSpeaking(true); }, []),
+    onLockReleased: useCallback(() => { setPartnerSpeaking(false); }, []),
+    onTurnRejected: useCallback(() => {}, []),
 
-    // lock_released fires when server finishes processing (belt-and-suspenders
-    // alongside translated_audio_final to guarantee partnerSpeaking clears).
-    onLockReleased: useCallback(() => {
-      setPartnerSpeaking(false);
+    // Server confirmed queue resumed — unpause local loop and resume sound
+    onQueueResumed: useCallback(async () => {
+      isBargedInRef.current = false;
+      if (currentSoundRef.current) {
+        try { await currentSoundRef.current.playAsync(); } catch (_) {}
+      }
     }, []),
-
-    // turn_rejected is now a no-op — server ignores claim_turn entirely.
-    onTurnRejected: useCallback(() => { }, []),
   });
+
+  const isBargeInDebounceRef = useRef(false);
+  const partnerRole = role === 'host' ? 'guest' : 'host';
+
+  // Called when VAD detects local speech during partner playback — pause, don't cancel
+  const handleBargeIn = useCallback(async () => {
+    if (isBargeInDebounceRef.current) return;
+    isBargeInDebounceRef.current = true;
+    setTimeout(() => { isBargeInDebounceRef.current = false; }, 300);
+
+    if (!isPlayingAudio && !partnerSpeaking) return;
+
+    isBargedInRef.current = true;
+
+    // Pause the currently playing sound at its exact position
+    if (currentSoundRef.current) {
+      try { await currentSoundRef.current.pauseAsync(); } catch (_) {}
+    }
+
+    // Tell server to pause the partner's drain loop (keeps queue intact)
+    sendPauseQueue(partnerRole, sessionId);
+  }, [isPlayingAudio, partnerSpeaking, partnerRole, sessionId, sendPauseQueue]);
+
+  // Called when local speech silence is detected after a barge-in — resume partner
+  const handleBargeInRelease = useCallback(() => {
+    if (!isBargedInRef.current) return;
+    // Tell server to resume draining — it will send queue_resumed when ready
+    sendResumeQueue(partnerRole, sessionId);
+    // Note: isBargedInRef.current is cleared in onQueueResumed callback
+  }, [partnerRole, sessionId, sendResumeQueue]);
 
   const silenceCallbackRef = useRef<(() => void) | undefined>(undefined);
 
-  // VAD only drives the local UI (audio bars, "SPEECH DETECTED" text).
-  // It no longer claims any server floor — audio_chunk arrival does that.
-  const { isRecording, isCalibrating, isSpeaking, startRecording, stopRecording, audioLevel } =
+  const { isRecording, isCalibrating, isSpeaking, startRecording, stopRecording, forceStop, audioLevel } =
     useAudioRecorder({
       onSpeechDetected: useCallback(() => {
-        // No server call needed — visual feedback only via isSpeaking state
-      }, []),
+        if (isPlayingAudio || partnerSpeaking) {
+          handleBargeIn();
+        }
+      }, [isPlayingAudio, partnerSpeaking, handleBargeIn]),
       onSilenceDetected: useCallback(() => {
+        // If we barged in, release on silence so partner audio resumes
+        handleBargeInRelease();
         if (silenceCallbackRef.current) silenceCallbackRef.current();
-      }, []),
+      }, [handleBargeInRelease]),
       nearFieldOnly: true,
     });
 
   const handleSilenceStop = useCallback(async () => {
     try {
-      const { base64, mimeType } = await stopRecording();
+      const { base64, mimeType, speechStartOffsetMs } = await stopRecording();
       if (base64 && base64.length > 100) {
-        sendAudioChunk(base64, mimeType, myLang, partnerLang, role, sessionId, speakerGender, speakerAge);
+        sendAudioChunk(base64, mimeType, myLang, partnerLang, role, sessionId, speechStartOffsetMs, speakerGender, speakerAge);
       }
     } catch (e) {
       console.warn('[SessionScreen] Silence stop error:', e);
@@ -206,35 +234,14 @@ export function SessionScreen({
     silenceCallbackRef.current = handleSilenceStop;
   }, [handleSilenceStop]);
 
-  // ── Safety Watchdog ──────────────────────────────────────────────────────────
-  // partnerSpeaking should self-clear via translated_audio / lock_released.
-  // This is a last-resort 8s timeout for network hiccups or Gemini errors.
-  const partnerSpeakingStartRef = useRef<number | null>(null);
-  useEffect(() => {
-    partnerSpeakingStartRef.current = partnerSpeaking ? Date.now() : null;
-  }, [partnerSpeaking]);
-
-  useEffect(() => {
-    const watchdog = setInterval(() => {
-      const lockedAt = partnerSpeakingStartRef.current;
-      if (lockedAt && !isPlayingAudio && Date.now() - lockedAt > 8_000) {
-        console.warn('[SessionScreen] Watchdog: partnerSpeaking >8s with no audio — force clearing.');
-        setPartnerSpeaking(false);
-        partnerSpeakingStartRef.current = null;
-      }
-    }, 2_000);
-    return () => clearInterval(watchdog);
-  }, [isPlayingAudio]);
-
-
   // ── Auto-Hands-Free Loop ────────────────────────────────────────────────────
-  const canRecord = status === 'connected' && 
-    !isProcessing && 
-    !isPlayingAudio && 
-    !partnerSpeaking && 
-    !isEchoGuardActive && 
-    !isPaused && 
-    !hasError;
+  // On iOS, hardware AEC works perfectly so we can record while playing (full duplex / barge-in).
+  // On Android, we disable recording during playback to prevent the microphone from
+  // capturing the speaker's translation (which causes the AI to repeat it back).
+  const canRecord = status === 'connected' &&
+    !isPaused &&
+    !hasError &&
+    (Platform.OS === 'ios' || !isPlayingAudio);
 
   const isTransitioningRef = useRef(false);
 
@@ -242,7 +249,7 @@ export function SessionScreen({
     let mounted = true;
     const manageRecordingState = async () => {
       if (isTransitioningRef.current) return;
-      
+
       if (canRecord && !isRecording) {
         try {
           isTransitioningRef.current = true;
@@ -387,10 +394,24 @@ export function SessionScreen({
           </View>
         )}
 
+        {/* Queue indicator — shown when the sender has more sentences waiting */}
+        {queueDepth > 0 && (
+          <View style={styles.queueBadge}>
+            <Feather name="layers" size={11} color="rgba(255,200,0,0.8)" />
+            <Text style={styles.queueText}>{queueDepth} more queued...</Text>
+          </View>
+        )}
+
         {isPlayingAudio && (
-          <View style={styles.processingPanel}>
-            <Feather name="volume-2" size={16} color="#39FF14" />
-            <Text style={styles.processingLabel}>PLAYING...</Text>
+          <View style={{ alignItems: 'center', marginBottom: 16 }}>
+            <View style={[styles.processingPanel, { marginBottom: 4 }]}>
+              <Feather name="volume-2" size={16} color="#39FF14" />
+              <Text style={styles.processingLabel}>PLAYING...</Text>
+            </View>
+            <TouchableOpacity onPress={handleBargeIn} style={styles.interruptBtn}>
+              <Feather name="mic" size={12} color="rgba(57,255,20,0.6)" />
+              <Text style={styles.interruptText}>TAP OR SPEAK TO INTERRUPT</Text>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -633,5 +654,30 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.25)', fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
     letterSpacing: 0.5,
+  },
+  queueBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: 6, paddingHorizontal: 12,
+    backgroundColor: 'rgba(255,200,0,0.06)',
+    borderRadius: 20, borderWidth: 1,
+    borderColor: 'rgba(255,200,0,0.18)',
+    marginBottom: 10, alignSelf: 'center',
+  },
+  queueText: {
+    color: 'rgba(255,200,0,0.7)', fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    letterSpacing: 1.5,
+  },
+  interruptBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: 8, paddingHorizontal: 14,
+    borderRadius: 20, borderWidth: 1,
+    borderColor: 'rgba(57,255,20,0.2)',
+    alignSelf: 'center', marginTop: 4,
+  },
+  interruptText: {
+    color: 'rgba(57,255,20,0.5)', fontSize: 9,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    letterSpacing: 2,
   },
 });

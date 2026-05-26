@@ -89,6 +89,7 @@ class LiveTranslationSession {
     this.currentResolve = null;
     this.currentReject = null;
     this.currentOnAudioChunk = null;
+    this.audioChunkIndex = 0;
   }
 
 
@@ -100,7 +101,7 @@ class LiveTranslationSession {
     // Neutral: 'Orbit'
     if (gender === 'male') return 'Puck';
     if (gender === 'female') return 'Aoede';
-    return 'Orbit'; // neutral fallback
+    return 'Aoede'; // neutral fallback
   }
 
   _buildConfig() {
@@ -111,7 +112,7 @@ class LiveTranslationSession {
       config: {
         systemInstruction: {
           parts: [{
-            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech.`
+            text: `You are a dedicated translator. Your ONLY task is to translate spoken audio from ${this.inputLang} into ${this.outputLang}. Translate naturally and idiomatically, preserving the true conversational meaning and intent rather than providing a literal word-for-word translation. Do NOT respond to the content of the message, do NOT answer questions, and do NOT engage in conversation. ONLY provide the translation. If the user asks a question, translate that question into ${this.outputLang} without answering it. Output ONLY the translated speech. CRITICAL: Do NOT repeat previous translations. ONLY translate the new audio clip provided in the current turn. Ignore any background noise, static, breathing, coughing, or unintelligible sounds. If the audio clip contains only noise and no clear speech, output absolutely nothing.`
           }]
         },
         responseModalities: ['AUDIO'],
@@ -139,23 +140,27 @@ class LiveTranslationSession {
         ? JSON.parse(data.toString())
         : data;
 
-      // Collect raw PCM audio chunks from the model
+      // Collect raw PCM audio and text from the model's turn
       if (msg.serverContent && msg.serverContent.modelTurn) {
         for (const part of msg.serverContent.modelTurn.parts) {
+          if (part.text) {
+            this.fullTranslationText += part.text;
+          }
           if (part.inlineData) {
-            this.audioBuffers.push(Buffer.from(part.inlineData.data, 'base64'));
+            const pcmBuffer = Buffer.from(part.inlineData.data, 'base64');
+            this.audioBuffers.push(pcmBuffer);
           }
         }
       }
 
-      // Capture the model's spoken translation text
+      // Capture the model's spoken translation text (outputTranscription)
       if (msg.serverContent && msg.serverContent.outputTranscription) {
         if (msg.serverContent.outputTranscription.text) {
           this.fullTranslationText += msg.serverContent.outputTranscription.text;
         }
       }
 
-      // Capture the user's original speech text
+      // Capture the user's original speech text (inputTranscription)
       if (msg.serverContent && msg.serverContent.inputTranscription) {
         if (msg.serverContent.inputTranscription.text) {
           this.fullOriginalText += msg.serverContent.inputTranscription.text;
@@ -163,12 +168,17 @@ class LiveTranslationSession {
       }
 
       if (msg.serverContent && msg.serverContent.turnComplete) {
-        // Wrap all PCM chunks into a single WAV and fire the callback
-        if (this.audioBuffers.length > 0 && this.currentOnAudioChunk) {
+        // Build the combined translated WAV once so we can both stream it and save it
+        let translatedAudioBase64 = null;
+        if (this.audioBuffers.length > 0) {
           const combinedPcm = Buffer.concat(this.audioBuffers);
-          const wavBuffer = wrapPcmInWav(combinedPcm, 24000);
+          translatedAudioBase64 = wrapPcmInWav(combinedPcm, 24000).toString('base64');
+        }
+
+        // Send the entire accumulated sentence as one complete audio chunk
+        if (this.currentOnAudioChunk && translatedAudioBase64) {
           this.currentOnAudioChunk({
-            audioBase64: wavBuffer.toString('base64'),
+            audioBase64: translatedAudioBase64,
             index: 0,
             text: this.fullTranslationText.trim()
           });
@@ -178,12 +188,18 @@ class LiveTranslationSession {
           this.currentResolve({
             originalText: this.fullOriginalText.trim(),
             translatedText: this.fullTranslationText.trim(),
-            totalChunks: this.audioBuffers.length > 0 ? 1 : 0
+            totalChunks: 1,
+            translatedAudioBase64, // ← used by server.js to save to Supabase Storage
           });
         }
 
-        // Reset per-turn state (session stays open for the next turn)
+        // Reset per-turn state
         this._resetTurnState();
+
+        // Signal to geminiService to completely destroy this session instance
+        if (this.onTurnCompleteCallback) {
+          this.onTurnCompleteCallback();
+        }
       }
     } catch (err) {
       if (this.currentReject) {
@@ -218,6 +234,11 @@ class LiveTranslationSession {
     this.currentResolve = null;
     this.currentReject = null;
     this.currentOnAudioChunk = null;
+    this.audioChunkIndex = 0;
+  }
+
+  setTurnCompleteCallback(cb) {
+    this.onTurnCompleteCallback = cb;
   }
 
   /**
@@ -256,8 +277,23 @@ class LiveTranslationSession {
     await this.ensureConnected();
 
     return new Promise((resolve, reject) => {
-      this.currentResolve = resolve;
-      this.currentReject = reject;
+      // 15 second timeout to prevent getting stuck in "TRANSLATING..." state
+      const timeout = setTimeout(() => {
+        if (this.currentReject) {
+          console.warn(`[LiveTranslationSession] Timeout waiting for turnComplete (${this.inputLang}→${this.outputLang})`);
+          this.currentReject(new Error("Gemini API timeout"));
+          this._resetTurnState();
+        }
+      }, 15000);
+
+      this.currentResolve = (res) => {
+        clearTimeout(timeout);
+        resolve(res);
+      };
+      this.currentReject = (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      };
       this.currentOnAudioChunk = onAudioChunk;
 
       const clientMessage = {
@@ -365,6 +401,17 @@ async function processAudioChunk(sessionId, role, audioBase64, mimeType, inputLa
   }
 
   const liveSession = activeSessions.get(key);
+  
+  // Unconditionally attach the callback so that EVEN pre-warmed sessions get destroyed 
+  // after their first turn, guaranteeing the chat history is wiped.
+  liveSession.setTurnCompleteCallback(() => {
+    liveSession.close();
+    activeSessions.delete(key);
+    
+    // Eagerly pre-warm the next session so it's ready before the user speaks
+    warmupSession(sessionId, role, inputLang, outputLang, voiceProfile).catch(() => {});
+  });
+
   return liveSession.translate(audioBase64, mimeType, onAudioChunk);
 }
 

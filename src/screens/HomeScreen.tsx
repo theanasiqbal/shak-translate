@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   Platform,
   ScrollView,
   ActivityIndicator,
+  FlatList,
 } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { LanguageSelector } from '../components/LanguageSelector';
@@ -19,6 +20,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { useAuth, useUser } from '@clerk/clerk-expo';
 import { useRef } from 'react';
 import { Image } from 'react-native';
+import { WS_URL } from '../config';
 
 interface HomeScreenProps {
   onSessionReady: (params: {
@@ -28,24 +30,60 @@ interface HomeScreenProps {
     partnerLang: string;
   }) => void;
   onOpenProfile: () => void;
+  onOpenConversation: (conversationId: string, myUserId: string) => void;
+  onOpenRecordings: (conversationId: string, myUserId: string, myLang: string, partnerLang: string) => void;
 }
 
-export function HomeScreen({ onSessionReady, onOpenProfile }: HomeScreenProps) {
+interface RecentConversation {
+  id: string;
+  sessionId: string;
+  myLang: string;
+  partnerLang: string;
+  startedAt: string;
+  lastMessage: { text: string; sentAt: string; isMe: boolean } | null;
+  messageCount: number;
+}
+
+export function HomeScreen({ onSessionReady, onOpenProfile, onOpenConversation, onOpenRecordings }: HomeScreenProps) {
   const { signOut } = useAuth();
   const { user } = useUser();
   const [myLang, setMyLang] = useState('English');
   const [showQR, setShowQR] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [recentConversations, setRecentConversations] = useState<RecentConversation[]>([]);
+  const [loadingConvs, setLoadingConvs] = useState(false);
   const roleRef = useRef<'host' | 'guest' | null>(null);
+  const userId = user?.id;
+
+  // Helper to format timestamps
+  const timeAgo = (dateStr: string) => {
+    const diff = Date.now() - new Date(dateStr).getTime();
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 60) return `${minutes || 1}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  };
+
+  // Fetch recent conversations on mount
+  useEffect(() => {
+    if (!userId) return;
+    const httpUrl = WS_URL.replace(/^ws(s)?:\/\//, 'http$1://');
+    setLoadingConvs(true);
+    fetch(`${httpUrl}/conversations?userId=${encodeURIComponent(userId)}`)
+      .then(r => r.json())
+      .then(data => { if (Array.isArray(data)) setRecentConversations(data); })
+      .catch(e => console.warn('[HomeScreen] Failed to load conversations:', e))
+      .finally(() => setLoadingConvs(false));
+  }, [userId]);
 
   const { status, sessionId, partnerLang, createSession, joinSession, endSession } = useWebSocket({
     onError: (msg) => setErrorMsg(msg),
-    onTranslatedAudio: () => { }, // not used here
+    onTranslatedAudio: () => { },
     onPartnerDisconnected: () => { },
   });
 
-  // Called when session is ready and partner language is received
   React.useEffect(() => {
     if (status === 'connected' && sessionId && partnerLang && roleRef.current) {
       onSessionReady({ sessionId, role: roleRef.current, myLang, partnerLang });
@@ -55,14 +93,14 @@ export function HomeScreen({ onSessionReady, onOpenProfile }: HomeScreenProps) {
   const handleStartSession = async () => {
     setErrorMsg(null);
     roleRef.current = 'host';
-    await createSession(myLang);
+    await createSession(myLang, userId);
     setShowQR(true);
   };
 
   const handleScanned = async (scannedId: string) => {
     setShowScanner(false);
     roleRef.current = 'guest';
-    await joinSession(scannedId, myLang);
+    await joinSession(scannedId, myLang, userId);
   };
 
   return (
@@ -146,6 +184,53 @@ export function HomeScreen({ onSessionReady, onOpenProfile }: HomeScreenProps) {
             <Feather name="camera" size={20} color="#39FF14" />
             <Text style={styles.secondaryBtnText}>Join Session (Scan QR)</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* Recent Conversations */}
+        <View style={styles.recentSection}>
+          <View style={styles.recentHeader}>
+            <Feather name="message-square" size={13} color="rgba(255,255,255,0.3)" />
+            <Text style={styles.recentTitle}> RECENT CONVERSATIONS</Text>
+          </View>
+          {loadingConvs && <ActivityIndicator color="#39FF14" style={{ marginTop: 16 }} />}
+          {!loadingConvs && recentConversations.length === 0 && (
+            <Text style={styles.recentEmpty}>No conversations yet. Start a session!</Text>
+          )}
+          {recentConversations.map(conv => (
+            <View key={conv.id} style={styles.convItemWrapper}>
+              {/* Chat transcript button */}
+              <TouchableOpacity
+                style={styles.convItem}
+                onPress={() => onOpenConversation(conv.id, userId || '')}
+                activeOpacity={0.75}
+              >
+                <View style={styles.convIcon}>
+                  <Feather name="globe" size={16} color="#39FF14" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={styles.convLangs}>{conv.myLang} ↔ {conv.partnerLang || '...'}</Text>
+                    <Text style={styles.convTime}>
+                      {conv.lastMessage ? timeAgo(conv.lastMessage.sentAt) : timeAgo(conv.startedAt)}
+                    </Text>
+                  </View>
+                  <Text style={styles.convPreview} numberOfLines={1}>
+                    {conv.lastMessage
+                      ? `${conv.lastMessage.isMe ? 'You: ' : ''}${conv.lastMessage.text}`
+                      : `${conv.messageCount} messages`}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+              {/* Recordings button */}
+              <TouchableOpacity
+                style={styles.recordingsBtn}
+                onPress={() => onOpenRecordings(conv.id, userId || '', conv.myLang, conv.partnerLang || '')}
+                activeOpacity={0.75}
+              >
+                <Feather name="headphones" size={15} color="#39FF14" />
+              </TouchableOpacity>
+            </View>
+          ))}
         </View>
       </ScrollView>
 
@@ -314,4 +399,46 @@ const styles = StyleSheet.create({
     borderRadius: 12, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
   },
   cancelBtnText: { color: 'rgba(255,255,255,0.4)', fontSize: 14 },
+
+  // Recent Conversations
+  recentSection: { marginTop: 32 },
+  recentHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  recentTitle: { color: 'rgba(255,255,255,0.3)', fontSize: 11, fontWeight: '700', letterSpacing: 1, marginLeft: 6 },
+  recentEmpty: { color: 'rgba(255,255,255,0.3)', fontSize: 13, textAlign: 'center', marginTop: 16 },
+  convItem: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.05)',
+  },
+  convItemWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  recordingsBtn: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: 'rgba(57,255,20,0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(57,255,20,0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  convIcon: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: 'rgba(57,255,20,0.1)',
+    justifyContent: 'center', alignItems: 'center',
+    marginRight: 14,
+  },
+  convLangs: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  convTime: { color: 'rgba(255,255,255,0.4)', fontSize: 11 },
+  convPreview: { color: 'rgba(255,255,255,0.5)', fontSize: 13, marginTop: 4 },
 });

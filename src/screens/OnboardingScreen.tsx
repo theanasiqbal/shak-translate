@@ -21,8 +21,8 @@ const MIN_AGE = 10;
 const MAX_AGE = 90;
 
 const GENDER_OPTIONS: { value: Gender; label: string; icon: string }[] = [
-  { value: 'female',  label: 'Female',           icon: '♀' },
-  { value: 'male',    label: 'Male',              icon: '♂' },
+  { value: 'female', label: 'Female', icon: '♀' },
+  { value: 'male', label: 'Male', icon: '♂' },
   { value: 'neutral', label: 'Prefer not to say', icon: '◈' },
 ];
 
@@ -49,23 +49,23 @@ export function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
   const THUMB_SIZE = 28;
   const thumbLeft = agePercent * (TRACK_WIDTH - THUMB_SIZE);
 
-  const ageRef = React.useRef(age);
-  ageRef.current = age;
+  const currentAgeRef = React.useRef(age);
+  currentAgeRef.current = age;
+
+  const startAgeRef = React.useRef(age);
 
   const panResponder = React.useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: (evt) => {
-        // Optional: jump to tap location if user taps the track
-        // evt.nativeEvent.locationX can be tricky if they tap the thumb vs the track.
-        // For simplicity, we just establish the starting age for the drag.
-        ageRef.current = age;
+        // Establish the starting age for the drag from the latest current age
+        startAgeRef.current = currentAgeRef.current;
       },
       onPanResponderMove: (evt, gestureState) => {
         const deltaPercent = gestureState.dx / TRACK_WIDTH;
         const deltaAge = Math.round(deltaPercent * (MAX_AGE - MIN_AGE));
-        let newAge = ageRef.current + deltaAge;
+        let newAge = startAgeRef.current + deltaAge;
         if (newAge < MIN_AGE) newAge = MIN_AGE;
         if (newAge > MAX_AGE) newAge = MAX_AGE;
         setAge(newAge);
@@ -199,30 +199,7 @@ export function OnboardingScreen({ onComplete }: OnboardingScreenProps) {
             </View>
           </View>
 
-          {/* Stepper buttons */}
-          <View style={styles.stepperRow}>
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={decAge}
-              onLongPress={fastDec}
-              accessibilityLabel="Decrease age by 1"
-            >
-              <Feather name="minus" size={20} color="#fff" />
-            </TouchableOpacity>
 
-            <View style={styles.stepperMiddle}>
-              <Text style={styles.stepperHint}>Hold to change faster</Text>
-            </View>
-
-            <TouchableOpacity
-              style={styles.stepperBtn}
-              onPress={incAge}
-              onLongPress={fastInc}
-              accessibilityLabel="Increase age by 1"
-            >
-              <Feather name="plus" size={20} color="#fff" />
-            </TouchableOpacity>
-          </View>
         </View>
 
         {/* ── Privacy note ── */}

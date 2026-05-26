@@ -29,8 +29,9 @@ interface WebSocketContextType {
   sessionId: string | null;
   partnerLang: string | null;
   isProcessing: boolean;
-  createSession: (lang: string) => Promise<void>;
-  joinSession: (sid: string, lang: string) => Promise<void>;
+  queueDepth: number;
+  createSession: (lang: string, userId?: string) => Promise<void>;
+  joinSession: (sid: string, lang: string, userId?: string) => Promise<void>;
   sendAudioChunk: (
     audioBase64: string,
     mimeType: string,
@@ -38,13 +39,16 @@ interface WebSocketContextType {
     outputLang: string,
     role: string,
     sid: string,
+    speechStartOffsetMs?: number,
     speakerGender?: string,
     speakerAge?: number
   ) => void;
+  sendPauseQueue: (role: string, sid: string) => void;
+  sendResumeQueue: (role: string, sid: string) => void;
+  sendCancelQueue: (role: string, sid: string) => void; // kept for compat
   claimTurn: (role: string, sid: string, confidence?: number) => void;
   releaseTurn: (role: string, sid: string) => void;
   endSession: (role: string, sid: string) => void;
-  // Internal registration for hooks
   registerCallbacks: (id: string, callbacks: WebSocketCallbacks) => void;
   unregisterCallbacks: (id: string) => void;
 }
@@ -59,6 +63,7 @@ interface WebSocketCallbacks {
   onPartnerSpeaking?: () => void;
   onTurnRejected?: () => void;
   onLockReleased?: () => void;
+  onQueueResumed?: () => void;
   onSessionReadyEvent?: (partnerLang: string) => void;
 }
 
@@ -69,6 +74,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [partnerLang, setPartnerLang] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  // How many of the local user's sentences are queued server-side waiting to process
+  const [queueDepth, setQueueDepth] = useState(0);
 
   // Map of registered callbacks from various screens/components
   const callbacksMap = useRef<Map<string, WebSocketCallbacks>>(new Map());
@@ -103,6 +110,11 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
     if (type === 'processing_done') {
       setIsProcessing(false);
+    }
+
+    // Server reports how many of our sentences are still in the queue
+    if (type === 'queue_depth') {
+      setQueueDepth(message.depth ?? 0);
     }
 
     // Distribute messages to all registered listeners
@@ -147,8 +159,11 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
 
       if (type === 'lock_released') {
-        // Server watchdog auto-released a stale lock — clear the partnerSpeaking flag
         callbacks.onLockReleased?.();
+      }
+
+      if (type === 'queue_resumed') {
+        callbacks.onQueueResumed?.();
       }
 
       if (type === 'error') {
@@ -158,7 +173,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     });
   }, []);
 
-  const createSession = useCallback(async (lang: string) => {
+  const createSession = useCallback(async (lang: string, userId?: string) => {
     setStatus('connecting');
     try {
       websocketService.onMessage(handleMessage);
@@ -166,18 +181,16 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setStatus('disconnected');
         setIsProcessing(false);
       });
-      websocketService.onError(() => {
-        setStatus('error');
-      });
+      websocketService.onError(() => { setStatus('error'); });
       await websocketService.connect(WS_URL);
-      websocketService.send({ type: 'create_session', lang });
+      websocketService.send({ type: 'create_session', lang, userId });
     } catch (e) {
       setStatus('error');
       callbacksMap.current.forEach(c => c.onError?.('Failed to connect to server.'));
     }
   }, [handleMessage]);
 
-  const joinSession = useCallback(async (sid: string, lang: string) => {
+  const joinSession = useCallback(async (sid: string, lang: string, userId?: string) => {
     setStatus('connecting');
     try {
       websocketService.onMessage(handleMessage);
@@ -185,11 +198,9 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setStatus('disconnected');
         setIsProcessing(false);
       });
-      websocketService.onError(() => {
-        setStatus('error');
-      });
+      websocketService.onError(() => { setStatus('error'); });
       await websocketService.connect(WS_URL);
-      websocketService.send({ type: 'join_session', sessionId: sid, lang });
+      websocketService.send({ type: 'join_session', sessionId: sid, lang, userId });
       setSessionId(sid);
     } catch (e) {
       setStatus('error');
@@ -205,10 +216,14 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       outputLang: string,
       role: string,
       sid: string,
+      speechStartOffsetMs?: number,
       speakerGender?: string,
       speakerAge?: number
     ) => {
-      setIsProcessing(true);
+      // Do NOT optimistically set isProcessing here.
+      // The server signals processing_started when it actually begins work.
+      // Doing it here would lock the mic before the server is ready, preventing
+      // the sender from queuing a second sentence during Gemini processing.
       websocketService.send({
         type: 'audio_chunk',
         sessionId: sid,
@@ -217,6 +232,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         mimeType,
         inputLang,
         outputLang,
+        speechStartOffsetMs,
         // Voice profile fields — optional, backend falls back to neutral if missing
         ...(speakerGender ? { speakerGender } : {}),
         ...(speakerAge !== undefined ? { speakerAge } : {}),
@@ -224,6 +240,18 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     },
     []
   );
+
+  const sendCancelQueue = useCallback((role: string, sid: string) => {
+    websocketService.send({ type: 'cancel_queue', role, sessionId: sid });
+  }, []);
+
+  const sendPauseQueue = useCallback((role: string, sid: string) => {
+    websocketService.send({ type: 'pause_queue', role, sessionId: sid });
+  }, []);
+
+  const sendResumeQueue = useCallback((role: string, sid: string) => {
+    websocketService.send({ type: 'resume_queue', role, sessionId: sid });
+  }, []);
 
   const claimTurn = useCallback((role: string, sid: string, confidence: number = 1) => {
     websocketService.send({ type: 'claim_turn', sessionId: sid, role, confidence });
@@ -240,6 +268,7 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setSessionId(null);
     setPartnerLang(null);
     setIsProcessing(false);
+    setQueueDepth(0);
   }, []);
 
   // Cleanup on provider unmount (rare, usually app close)
@@ -256,9 +285,13 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         sessionId,
         partnerLang,
         isProcessing,
+        queueDepth,
         createSession,
         joinSession,
         sendAudioChunk,
+        sendPauseQueue,
+        sendResumeQueue,
+        sendCancelQueue,
         claimTurn,
         releaseTurn,
         endSession,
