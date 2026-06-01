@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import * as SecureStore from 'expo-secure-store';
 import {
   View,
   Text,
@@ -48,6 +49,19 @@ export function HomeScreen({ onSessionReady, onOpenProfile, onOpenConversation, 
   const { signOut } = useAuth();
   const { user } = useUser();
   const [myLang, setMyLang] = useState('English');
+
+  // Persist the user's chosen language so it survives session end / remounts
+  const MY_LANG_KEY = 'shak_my_language';
+  useEffect(() => {
+    SecureStore.getItemAsync(MY_LANG_KEY)
+      .then(saved => { if (saved) setMyLang(saved); })
+      .catch(() => {});
+  }, []);
+
+  const handleSetMyLang = (lang: string) => {
+    setMyLang(lang);
+    SecureStore.setItemAsync(MY_LANG_KEY, lang).catch(() => {});
+  };
   const [showQR, setShowQR] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -147,7 +161,7 @@ export function HomeScreen({ onSessionReady, onOpenProfile, onOpenConversation, 
         {/* Language Config */}
         <View style={styles.card}>
           <Text style={styles.cardTitle}>MY LANGUAGE</Text>
-          <LanguageSelector label="" selected={myLang} onSelect={setMyLang} />
+          <LanguageSelector label="" selected={myLang} onSelect={handleSetMyLang} />
         </View>
 
         {/* Actions */}
